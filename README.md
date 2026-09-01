@@ -164,10 +164,13 @@ calls.
 
 ```bash
 cargo fmt --all -- --check
-cargo check --all-targets
-cargo test --all-targets
-cargo doc --no-deps
+cargo check --all-targets --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo bench --bench throughput
+cargo package --locked
+cargo build --release --locked
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
