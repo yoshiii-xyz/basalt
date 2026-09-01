@@ -1,8 +1,8 @@
-# Basalt
-
 <p align="center">
-  <img src="assets/logo.png" alt="Basalt logo" width="280">
+  <img src="assets/logo.png" alt="Basalt logo" width="160">
 </p>
+
+<h1 align="center">Basalt</h1>
 
 Basalt is a dependency-free embedded SQL database and command-line application
 written from scratch in Rust. It has a small public API, an interactive shell,
