@@ -434,7 +434,7 @@ fn acquire_lock(path: &Path) -> Result<File, DbError> {
     match fs4::FileExt::try_lock(&file) {
         Ok(()) => Ok(file),
         Err(fs4::TryLockError::WouldBlock) => Err(dberr(
-            DbErrorKind::Transaction,
+            DbErrorKind::Busy,
             format!("database is already open: {}", path.display()),
         )),
         Err(fs4::TryLockError::Error(error)) => Err(dberr(
@@ -595,6 +595,7 @@ mod tests {
             Ok(_) => panic!("a second database open should be rejected"),
             Err(error) => error,
         };
+        assert_eq!(error.kind, DbErrorKind::Busy);
         assert!(error.message.contains("already open"));
         drop(first);
         let second = Database::open(&path).unwrap();

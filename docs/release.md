@@ -31,7 +31,7 @@ do not claim an audit was performed when the tool was unavailable.
 
 ## Smoke tests
 
-1. Install the binary from the checkout with `cargo install --path .`.
+1. Install the binary from the checkout with `cargo install --path . --locked`.
 2. Create a durable database with the CLI, query it in table/CSV/JSON-lines
    modes, close it, and query it again.
 3. Exercise `BEGIN`, `COMMIT`, and `ROLLBACK` across repeated `--command`

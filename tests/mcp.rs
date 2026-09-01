@@ -328,6 +328,46 @@ fn durable_database_survives_mcp_restart() {
     remove_database_files(&path);
 }
 
+#[test]
+fn tool_errors_are_recoverable_json_results() {
+    let mut server = McpProcess::start();
+    initialize_legacy(&mut server);
+
+    let missing_table = server.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "execute",
+            "arguments": {"sql": "SELECT * FROM missing_table"}
+        }),
+    );
+    assert_eq!(result(&missing_table)["isError"], true);
+    assert!(
+        result(&missing_table)["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such table")
+    );
+
+    let invalid_limit = server.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {"sql": "SELECT 1", "max_rows": 0}
+        }),
+    );
+    assert_eq!(result(&invalid_limit)["isError"], true);
+
+    let tables = server.request(
+        4,
+        "tools/call",
+        json!({"name": "list_tables", "arguments": {}}),
+    );
+    assert!(result(&tables)["structuredContent"]["tables"].is_array());
+    server.close();
+}
+
 fn unique_database_path() -> std::path::PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

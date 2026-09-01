@@ -31,6 +31,7 @@ pub enum DbErrorKind {
     UnknownColumn,
     ColumnCount,
     Io(String),
+    Busy,
     Transaction,
     Internal(String),
 }

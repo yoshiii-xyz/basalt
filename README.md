@@ -37,7 +37,7 @@ durable behavior, and practical command-line use.
 Rust 1.88 or newer is required.
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
 To run directly from a checkout:
@@ -79,7 +79,7 @@ Basalt can run as a local [Model Context Protocol](https://modelcontextprotocol.
 server over stdio. Install the binary from this checkout:
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Then configure an MCP host with an absolute database path:

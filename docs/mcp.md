@@ -17,7 +17,7 @@ legacy initialize handshake.
 From a Basalt checkout:
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Confirm the binary is available:
