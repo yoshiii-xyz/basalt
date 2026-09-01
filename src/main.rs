@@ -9,6 +9,10 @@ fn main() {
         crash_test_writer(args.get(1).map(String::as_str));
         return;
     }
+    if args.first().map(String::as_str) == Some("mcp") {
+        run_mcp(&args[1..]);
+        return;
+    }
 
     let options = match cli::parse_args(&args) {
         Ok(options) => options,
@@ -26,12 +30,7 @@ fn main() {
         return;
     }
 
-    let database = if options.database == ":memory:" {
-        Ok(Database::in_memory())
-    } else {
-        Database::open(&options.database)
-    };
-    let database = match database {
+    let database = match open_database(&options.database) {
         Ok(database) => database,
         Err(error) => {
             eprintln!("basalt: {error}");
@@ -45,6 +44,41 @@ fn main() {
     if let Err(error) = cli::run(&options, database, &mut input, &mut output) {
         let _ = writeln!(io::stderr(), "basalt: {error}");
         std::process::exit(1);
+    }
+}
+
+fn run_mcp(args: &[String]) {
+    let options = match basalt::mcp::parse_args(args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("basalt mcp: {error}");
+            std::process::exit(2);
+        }
+    };
+    if options.help {
+        print!("{}", basalt::mcp::HELP);
+        return;
+    }
+
+    let database = match open_database(&options.database) {
+        Ok(database) => database,
+        Err(error) => {
+            eprintln!("basalt mcp: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(error) = basalt::mcp::run(database) {
+        eprintln!("basalt mcp: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn open_database(path: &str) -> Result<Database, basalt::db::DbError> {
+    if path == ":memory:" {
+        Ok(Database::in_memory())
+    } else {
+        Database::open(path)
     }
 }
 

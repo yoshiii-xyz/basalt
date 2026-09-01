@@ -2,12 +2,12 @@
 name = "basalt"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
-description = "An embedded SQL database engine built from scratch: parser, planner, MVCC transactions, WAL, B-tree indexes"
+rust-version = "1.88"
+description = "An embedded SQL database and stdio MCP server built from scratch in Rust"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/joshiii-xyz/basalt"
-keywords = ["database", "embedded", "sql", "storage"]
+keywords = ["database", "embedded", "sql", "mcp", "ai"]
 categories = ["database-implementations", "command-line-utilities"]
 
 [lib]
@@ -15,6 +15,11 @@ name = "basalt"
 path = "src/lib.rs"
 
 [dependencies]
+rmcp = { version = "3.2.0", features = ["macros", "schemars", "server", "transport-io"] }
+schemars = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["io-std", "net", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "throughput"

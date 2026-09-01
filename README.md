@@ -12,11 +12,11 @@
   </p>
 </div>
 
-Basalt is a dependency-free embedded SQL database and command-line application
-built from scratch in Rust. It provides a small library API, an interactive
-shell, durable storage, snapshot-isolated transactions, and crash recovery.
-It focuses on readable end-to-end implementation, durable behavior, and
-practical command-line use.
+Basalt is an embedded SQL database and command-line application built from
+scratch in Rust. It provides a small library API, an interactive shell,
+durable storage, snapshot-isolated transactions, crash recovery, and a stdio
+MCP server for AI agents. It focuses on readable end-to-end implementation,
+durable behavior, and practical command-line use.
 
 ## Highlights
 
@@ -29,10 +29,12 @@ practical command-line use.
   state after a process crash.
 - Simple query planning with table scans, equality indexes, and range indexes.
 - Interactive and scriptable CLI output in table, CSV, and JSON-lines formats.
+- Installable MCP server with typed SQL tools, schema resources, bounded
+  results, and stateful transactions over one agent session.
 
 ## Installation
 
-Rust 1.85 or newer is required.
+Rust 1.88 or newer is required.
 
 ```bash
 cargo install --path .
@@ -68,6 +70,38 @@ basalt --json --command "SELECT * FROM users ORDER BY id;" app.basalt
 Use `Database::in_memory()` for an ephemeral database. Durable writes are
 appended to the WAL immediately; call `checkpoint()` to fold the current state
 into the snapshot and clear old WAL frames.
+
+## MCP server
+
+Basalt can run as a local [Model Context Protocol](https://modelcontextprotocol.io/)
+server over stdio. Install the binary from this checkout:
+
+```bash
+cargo install --path .
+```
+
+Then configure an MCP host with an absolute database path:
+
+```json
+{
+  "mcpServers": {
+    "basalt": {
+      "command": "basalt",
+      "args": ["mcp", "/absolute/path/to/app.basalt"]
+    }
+  }
+}
+```
+
+Use `"args": ["mcp", ":memory:"]` for an ephemeral session. The installed
+binary is preferred for host configuration; running from a checkout is also
+possible with `cargo run --quiet -- mcp /absolute/path/to/app.basalt`.
+
+The server exposes `query` for `SELECT` and `EXPLAIN SELECT`, `execute` for
+writes and transaction control, `list_tables`, `describe_table`, and
+`checkpoint`. It also exposes the current schema at `basalt://schema`. Query
+responses are structured and bounded; see [docs/mcp.md](docs/mcp.md) for the
+tool contract, configuration details, and troubleshooting.
 
 ## CLI
 
@@ -118,6 +152,8 @@ calls.
 | src/db.rs, src/database.rs | Tables, constraints, transactions, and API |
 | src/storage.rs, src/wal.rs | Snapshots, checksums, and recovery |
 | src/cli.rs | Interactive and scripted command-line frontend |
+| src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
+| docs/mcp.md | MCP installation, configuration, and tool contract |
 | tests/ | Integration and crash-recovery coverage |
 | benches/ | Throughput benchmark |
 

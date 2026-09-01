@@ -6,6 +6,7 @@ pub mod database;
 pub mod db;
 pub mod engine;
 pub mod eval;
+pub mod mcp;
 pub mod planner;
 pub mod sql;
 pub mod storage;

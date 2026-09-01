@@ -1,9 +1,9 @@
 //! User-facing command-line frontend for Basalt.
 //!
-//! The database engine is intentionally dependency-free, so the CLI keeps its
+//! The SQL engine stays independent of frontend concerns, so the CLI keeps its
 //! argument parsing, SQL buffering, result formatting, and meta commands in
-//! this module as well. Keeping the frontend testable outside the executable
-//! makes script and interactive behavior share the same connection semantics.
+//! this module. Keeping the frontend testable outside the executable makes
+//! script and interactive behavior share the same connection semantics.
 
 use std::fmt;
 use std::fs::File;
@@ -18,6 +18,7 @@ pub const HELP: &str = "Basalt — embedded SQL database\n\n\
 Usage:\n  basalt [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Options:\n  -c, --command SQL       Execute SQL and exit; may be repeated\n  -f, --file PATH         Execute a SQL script and exit; '-' reads stdin\n  -o, --output FORMAT     Result format: table, csv, or json\n      --table             Use table output (the default)\n      --csv               Use CSV output\n      --json              Use JSON-lines output\n      --no-header         Omit column headers in table/CSV output\n      --quiet             Suppress non-query success messages\n  -h, --help              Print this help\n  -V, --version           Print the version\n\n\
 Interactive commands:\n  .help                   Show this help\n  .tables                 List tables\n  .schema [TABLE]         Show CREATE TABLE statements\n  .mode table|csv|json    Change result format\n  .headers on|off         Toggle result headers\n  .checkpoint             Flush the snapshot and truncate the WAL\n  .show                   Show frontend state\n  .clear                  Discard the pending SQL buffer\n  .quit, .exit            Leave the shell\n\n\
+MCP server:\n  basalt mcp [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 JSON output is one JSON object per statement (JSON Lines). CSV output emits\n\
 only query rows, so it can be piped directly into another data tool.\n";
 

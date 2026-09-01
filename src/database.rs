@@ -307,6 +307,11 @@ impl Connection {
     pub fn in_transaction(&self) -> bool {
         self.transaction.is_some()
     }
+
+    /// Return the committed generation visible to this connection's database.
+    pub fn generation(&self) -> u64 {
+        self.db.generation()
+    }
 }
 
 /// A private MVCC-style snapshot.  Reads use the snapshot without holding a

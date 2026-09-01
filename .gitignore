@@ -8,6 +8,7 @@
 *.basalt-wal
 *.basalt.tmp
 *.tmp
+*.wal
 
 # Editors and local tooling
 .DS_Store
