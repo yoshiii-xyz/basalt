@@ -18,7 +18,7 @@ pub enum Token {
     Slash,
     Percent,
     Eq,
-    NotEq,      // != or <>
+    NotEq, // != or <>
     Lt,
     LtEq,
     Gt,
@@ -33,6 +33,7 @@ pub struct TokenSpan {
     pub offset: usize,
 }
 
+#[derive(Debug)]
 pub struct LexError {
     pub message: String,
     pub offset: usize,
@@ -64,41 +65,86 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                     i += 1;
                 }
                 if !closed {
-                    return Err(LexError { message: "unterminated block comment".into(), offset: i });
+                    return Err(LexError {
+                        message: "unterminated block comment".into(),
+                        offset: i,
+                    });
                 }
             }
-            b'(' => { out.push_tok(Token::LParen, i); i += 1; }
-            b')' => { out.push_tok(Token::RParen, i); i += 1; }
-            b',' => { out.push_tok(Token::Comma, i); i += 1; }
-            b';' => { out.push_tok(Token::Semi, i); i += 1; }
-            b'*' => { out.push_tok(Token::Star, i); i += 1; }
-            b'+' => { out.push_tok(Token::Plus, i); i += 1; }
-            b'-' => { out.push_tok(Token::Minus, i); i += 1; }
-            b'/' => { out.push_tok(Token::Slash, i); i += 1; }
-            b'%' => { out.push_tok(Token::Percent, i); i += 1; }
-            b'.' => { out.push_tok(Token::Dot, i); i += 1; }
-            b'=' => { out.push_tok(Token::Eq, i); i += 1; }
+            b'(' => {
+                out.push_tok(Token::LParen, i);
+                i += 1;
+            }
+            b')' => {
+                out.push_tok(Token::RParen, i);
+                i += 1;
+            }
+            b',' => {
+                out.push_tok(Token::Comma, i);
+                i += 1;
+            }
+            b';' => {
+                out.push_tok(Token::Semi, i);
+                i += 1;
+            }
+            b'*' => {
+                out.push_tok(Token::Star, i);
+                i += 1;
+            }
+            b'+' => {
+                out.push_tok(Token::Plus, i);
+                i += 1;
+            }
+            b'-' => {
+                out.push_tok(Token::Minus, i);
+                i += 1;
+            }
+            b'/' => {
+                out.push_tok(Token::Slash, i);
+                i += 1;
+            }
+            b'%' => {
+                out.push_tok(Token::Percent, i);
+                i += 1;
+            }
+            b'.' => {
+                out.push_tok(Token::Dot, i);
+                i += 1;
+            }
+            b'=' => {
+                out.push_tok(Token::Eq, i);
+                i += 1;
+            }
             b'!' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push_tok(Token::NotEq, i); i += 2;
+                    out.push_tok(Token::NotEq, i);
+                    i += 2;
                 } else {
-                    return Err(LexError { message: "unexpected '!'".into(), offset: i });
+                    return Err(LexError {
+                        message: "unexpected '!'".into(),
+                        offset: i,
+                    });
                 }
             }
             b'<' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push_tok(Token::LtEq, i); i += 2;
+                    out.push_tok(Token::LtEq, i);
+                    i += 2;
                 } else if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                    out.push_tok(Token::NotEq, i); i += 2;
+                    out.push_tok(Token::NotEq, i);
+                    i += 2;
                 } else {
-                    out.push_tok(Token::Lt, i); i += 1;
+                    out.push_tok(Token::Lt, i);
+                    i += 1;
                 }
             }
             b'>' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push_tok(Token::GtEq, i); i += 2;
+                    out.push_tok(Token::GtEq, i);
+                    i += 2;
                 } else {
-                    out.push_tok(Token::Gt, i); i += 1;
+                    out.push_tok(Token::Gt, i);
+                    i += 1;
                 }
             }
             b'\'' => {
@@ -108,7 +154,10 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                 let mut s = String::new();
                 loop {
                     if i >= bytes.len() {
-                        return Err(LexError { message: "unterminated string literal".into(), offset: start });
+                        return Err(LexError {
+                            message: "unterminated string literal".into(),
+                            offset: start,
+                        });
                     }
                     if bytes[i] == b'\'' {
                         if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
@@ -120,7 +169,12 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                         }
                     } else {
                         let ch_len = utf8_len(bytes[i]);
-                        s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| LexError { message: "invalid UTF-8".into(), offset: i })?);
+                        s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| {
+                            LexError {
+                                message: "invalid UTF-8".into(),
+                                offset: i,
+                            }
+                        })?);
                         i += ch_len;
                     }
                 }
@@ -132,15 +186,60 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                 let mut s = String::new();
                 loop {
                     if i >= bytes.len() {
-                        return Err(LexError { message: "unterminated quoted identifier".into(), offset: start });
+                        return Err(LexError {
+                            message: "unterminated quoted identifier".into(),
+                            offset: start,
+                        });
                     }
                     if bytes[i] == b'"' {
-                        i += 1;
-                        break;
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                            s.push('"');
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
                     }
                     let ch_len = utf8_len(bytes[i]);
-                    s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| LexError { message: "invalid UTF-8".into(), offset: i })?);
+                    s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| {
+                        LexError {
+                            message: "invalid UTF-8".into(),
+                            offset: i,
+                        }
+                    })?);
                     i += ch_len;
+                }
+                out.push_tok(Token::QuotedIdent(s), start);
+            }
+            b'[' => {
+                let start = i;
+                i += 1;
+                let mut s = String::new();
+                loop {
+                    if i >= bytes.len() {
+                        return Err(LexError {
+                            message: "unterminated bracketed identifier".into(),
+                            offset: start,
+                        });
+                    }
+                    if bytes[i] == b']' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b']' {
+                            s.push(']');
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        let ch_len = utf8_len(bytes[i]);
+                        s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| {
+                            LexError {
+                                message: "invalid UTF-8".into(),
+                                offset: i,
+                            }
+                        })?);
+                        i += ch_len;
+                    }
                 }
                 out.push_tok(Token::QuotedIdent(s), start);
             }
@@ -151,7 +250,10 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                     if bytes[i] == b'.' {
                         // reject things like 1.2.3
                         if is_real {
-                            return Err(LexError { message: "malformed number".into(), offset: start });
+                            return Err(LexError {
+                                message: "malformed number".into(),
+                                offset: start,
+                            });
                         }
                         is_real = true;
                     }
@@ -159,10 +261,16 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                 }
                 let text = &input[start..i];
                 if is_real {
-                    let f: f64 = text.parse().map_err(|_| LexError { message: "malformed number".into(), offset: start })?;
+                    let f: f64 = text.parse().map_err(|_| LexError {
+                        message: "malformed number".into(),
+                        offset: start,
+                    })?;
                     out.push_tok(Token::Real(f), start);
                 } else {
-                    let n: i64 = text.parse().map_err(|_| LexError { message: "integer out of range".into(), offset: start })?;
+                    let n: i64 = text.parse().map_err(|_| LexError {
+                        message: "integer out of range".into(),
+                        offset: start,
+                    })?;
                     out.push_tok(Token::Integer(n), start);
                 }
             }
@@ -190,7 +298,10 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                     }
                     out.push_tok(Token::Ident(input[start..i].to_string()), start);
                 } else {
-                    return Err(LexError { message: format!("unexpected character {:?}", ch), offset: i });
+                    return Err(LexError {
+                        message: format!("unexpected character {:?}", ch),
+                        offset: i,
+                    });
                 }
             }
         }
@@ -204,10 +315,41 @@ trait PushToken {
 }
 impl PushToken for Vec<TokenSpan> {
     fn push_tok(&mut self, t: Token, off: usize) {
-        self.push(TokenSpan { token: t, offset: off });
+        self.push(TokenSpan {
+            token: t,
+            offset: off,
+        });
     }
 }
 
 fn utf8_len(b: u8) -> usize {
-    if b < 0x80 { 1 } else if b >> 5 == 0b110 { 2 } else if b >> 4 == 0b1110 { 3 } else { 4 }
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escaped_quoted_identifiers() {
+        let tokens = lex("SELECT \"a\"\"b\", [c]]d] FROM t").unwrap();
+        assert!(
+            tokens
+                .iter()
+                .any(|span| span.token == Token::QuotedIdent("a\"b".into()))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|span| span.token == Token::QuotedIdent("c]d".into()))
+        );
+    }
 }

@@ -1,0 +1,856 @@
+//! SQL executor and the first query-planning layer.
+//!
+//! Queries are resolved into a flat row/schema representation. This keeps
+//! joins, grouping, scalar expressions, and three-valued predicates on one
+//! execution path while retaining the simple `State` API used by the storage
+//! tests.
+
+use std::cmp::Ordering;
+use std::collections::HashSet;
+
+use crate::db::{Column, DbError, DbErrorKind, Row, State, StatementResult, Table, dberr};
+use crate::eval::{self, ColumnBinding};
+use crate::planner::{self, AccessPath};
+use crate::sql::ast::{ColumnDef, Expr, JoinKind, SelectItems, Statement};
+use crate::types::Value;
+
+pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, DbError> {
+    match stmt {
+        Statement::CreateTable {
+            name,
+            if_not_exists,
+            columns,
+        } => {
+            if state.contains_table(name) {
+                if *if_not_exists {
+                    return Ok(StatementResult::CreateTable { name: name.clone() });
+                }
+                return Err(dberr(
+                    DbErrorKind::Constraint,
+                    format!("table '{name}' already exists"),
+                ));
+            }
+            let columns: Vec<Column> = columns.iter().map(col_from_def).collect();
+            state
+                .tables
+                .insert(name.clone(), Table::new(name, columns)?);
+            Ok(StatementResult::CreateTable { name: name.clone() })
+        }
+        Statement::DropTable { name, if_exists } => {
+            if state.remove_table(name).is_none() {
+                if *if_exists {
+                    return Ok(StatementResult::DropTable { name: name.clone() });
+                }
+                return Err(dberr(
+                    DbErrorKind::UnknownTable,
+                    format!("no such table: {name}"),
+                ));
+            }
+            Ok(StatementResult::DropTable { name: name.clone() })
+        }
+        Statement::CreateIndex {
+            name,
+            table,
+            column,
+            unique,
+            if_not_exists,
+        } => {
+            if state.contains_index(name) {
+                if *if_not_exists {
+                    return Ok(StatementResult::CreateIndex {
+                        name: name.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                    });
+                }
+                return Err(dberr(
+                    DbErrorKind::Constraint,
+                    format!("index '{name}' already exists"),
+                ));
+            }
+            let table_ref = state.table_mut(table).ok_or_else(|| {
+                dberr(DbErrorKind::UnknownTable, format!("no such table: {table}"))
+            })?;
+            if table_ref.has_index(name) {
+                if *if_not_exists {
+                    return Ok(StatementResult::CreateIndex {
+                        name: name.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                    });
+                }
+                return Err(dberr(
+                    DbErrorKind::Constraint,
+                    format!("index '{name}' already exists"),
+                ));
+            }
+            let column_index = table_ref.column_index(column)?;
+            table_ref.create_index(name, column_index, *unique)?;
+            Ok(StatementResult::CreateIndex {
+                name: name.clone(),
+                table: table.clone(),
+                column: column.clone(),
+            })
+        }
+        Statement::DropIndex { name, if_exists } => {
+            let dropped = state
+                .tables
+                .values_mut()
+                .any(|table| table.drop_index(name));
+            if !dropped && !if_exists {
+                return Err(dberr(
+                    DbErrorKind::Constraint,
+                    format!("no such index: {name}"),
+                ));
+            }
+            Ok(StatementResult::DropIndex { name: name.clone() })
+        }
+        Statement::Insert {
+            table,
+            columns,
+            rows,
+        } => exec_insert(state, table, columns, rows),
+        Statement::InsertSelect {
+            table,
+            columns,
+            query,
+        } => exec_insert_select(state, table, columns, query),
+        Statement::Select { .. } => exec_select(state, stmt),
+        Statement::Explain(inner) => exec_explain(state, inner),
+        Statement::Update {
+            table,
+            assignments,
+            where_clause,
+        } => exec_update(state, table, assignments, where_clause),
+        Statement::Delete {
+            table,
+            where_clause,
+        } => exec_delete(state, table, where_clause),
+        Statement::Begin => Ok(StatementResult::Begin),
+        Statement::Commit => Ok(StatementResult::Commit),
+        Statement::Rollback => Ok(StatementResult::Rollback),
+        Statement::Checkpoint => Ok(StatementResult::Checkpoint),
+    }
+}
+
+fn col_from_def(definition: &ColumnDef) -> Column {
+    Column {
+        name: definition.name.clone(),
+        ty: definition.ty.clone(),
+        not_null: definition.not_null,
+        unique: definition.unique,
+        primary_key: definition.primary_key,
+    }
+}
+
+fn eval_const(expr: &Expr) -> Result<Value, DbError> {
+    // VALUES expressions are evaluated without a row.  This supports
+    // constant arithmetic, NULL checks, and scalar functions while naturally
+    // rejecting column references and aggregate expressions.
+    let empty_row: Row = Vec::new();
+    eval::eval_with_schema(&[], &empty_row, expr)
+}
+
+fn exec_insert(
+    state: &mut State,
+    table_name: &str,
+    columns: &Option<Vec<String>>,
+    rows: &[Vec<Expr>],
+) -> Result<StatementResult, DbError> {
+    let table = state.table(table_name).ok_or_else(|| {
+        dberr(
+            DbErrorKind::UnknownTable,
+            format!("no such table: {table_name}"),
+        )
+    })?;
+    let column_indices = match columns {
+        Some(names) => {
+            let mut result = Vec::with_capacity(names.len());
+            for name in names {
+                result.push(table.column_index(name)?);
+            }
+            ensure_unique_columns(&result, "INSERT column list")?;
+            result
+        }
+        None => (0..table.columns.len()).collect(),
+    };
+    if rows.is_empty() {
+        return Ok(StatementResult::Insert { rows_affected: 0 });
+    }
+    let expected = column_indices.len();
+    let table = state.table_mut(table_name).unwrap();
+    let mut candidate = table.clone();
+    for values_expr in rows {
+        if values_expr.len() != expected {
+            return Err(dberr(
+                DbErrorKind::ColumnCount,
+                format!(
+                    "column count mismatch: expected {expected}, got {}",
+                    values_expr.len()
+                ),
+            ));
+        }
+        let mut values = vec![Value::Null; candidate.columns.len()];
+        for (column, expr) in column_indices.iter().zip(values_expr) {
+            values[*column] = candidate.coerce_val(&eval_const(expr)?, *column)?;
+        }
+        candidate.insert_row(values)?;
+    }
+    let count = rows.len();
+    *table = candidate;
+    Ok(StatementResult::Insert {
+        rows_affected: count,
+    })
+}
+
+fn exec_insert_select(
+    state: &mut State,
+    table_name: &str,
+    columns: &Option<Vec<String>>,
+    query: &Statement,
+) -> Result<StatementResult, DbError> {
+    if !matches!(query, Statement::Select { .. }) {
+        return Err(dberr(
+            DbErrorKind::Syntax("INSERT SELECT requires a SELECT query".into()),
+            "INSERT SELECT requires a SELECT query",
+        ));
+    }
+    let selected = match exec_select(state, query)? {
+        StatementResult::Select { rows, .. } => rows,
+        _ => unreachable!(),
+    };
+    let table = state.table(table_name).ok_or_else(|| {
+        dberr(
+            DbErrorKind::UnknownTable,
+            format!("no such table: {table_name}"),
+        )
+    })?;
+    let column_indices = match columns {
+        Some(names) => {
+            let result = names
+                .iter()
+                .map(|name| table.column_index(name))
+                .collect::<Result<Vec<_>, _>>()?;
+            ensure_unique_columns(&result, "INSERT column list")?;
+            result
+        }
+        None => (0..table.columns.len()).collect(),
+    };
+    let expected = column_indices.len();
+    let table = state.table_mut(table_name).unwrap();
+    let mut candidate = table.clone();
+    for source in &selected {
+        if source.len() != expected {
+            return Err(dberr(
+                DbErrorKind::ColumnCount,
+                format!(
+                    "column count mismatch: expected {expected}, got {}",
+                    source.len()
+                ),
+            ));
+        }
+        let mut values = vec![Value::Null; candidate.columns.len()];
+        for (target, value) in column_indices.iter().zip(source) {
+            values[*target] = candidate.coerce_val(value, *target)?;
+        }
+        candidate.insert_row(values)?;
+    }
+    *table = candidate;
+    Ok(StatementResult::Insert {
+        rows_affected: selected.len(),
+    })
+}
+
+fn exec_explain(state: &State, stmt: &Statement) -> Result<StatementResult, DbError> {
+    let Statement::Select {
+        from,
+        from_alias,
+        where_clause,
+        ..
+    } = stmt
+    else {
+        return Ok(StatementResult::Explain(
+            "EXPLAIN supports SELECT statements".into(),
+        ));
+    };
+    if from.is_empty() {
+        return Ok(StatementResult::Explain(
+            "ConstantScan estimated_rows=1".into(),
+        ));
+    }
+    let table = state
+        .table(from)
+        .ok_or_else(|| dberr(DbErrorKind::UnknownTable, format!("no such table: {from}")))?;
+    let plan = planner::choose(
+        table,
+        from_alias.as_deref().or(Some(from)),
+        where_clause.as_ref(),
+    );
+    let text = match plan.access {
+        AccessPath::TableScan => format!(
+            "TableScan table={from} estimated_rows={}",
+            plan.estimated_rows
+        ),
+        AccessPath::IndexScan {
+            index_name,
+            column,
+            key,
+            row_ids,
+        } => format!(
+            "IndexScan index={index_name} table={from} column={column} key={key} candidates={} estimated_rows={}",
+            row_ids.len(),
+            plan.estimated_rows
+        ),
+        AccessPath::IndexRange {
+            index_name,
+            column,
+            low,
+            high,
+            row_ids,
+        } => format!(
+            "IndexRange index={index_name} table={from} column={column} low={low:?} high={high:?} candidates={} estimated_rows={}",
+            row_ids.len(),
+            plan.estimated_rows
+        ),
+    };
+    Ok(StatementResult::Explain(text))
+}
+
+#[derive(Clone)]
+struct QueryRow {
+    values: Row,
+}
+
+fn relation_schema(table: &Table, alias: Option<&str>) -> Vec<ColumnBinding> {
+    let mut relations = vec![table.name.clone()];
+    if let Some(alias) = alias {
+        if !relations
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(alias))
+        {
+            relations.push(alias.to_string());
+        }
+    }
+    table
+        .columns
+        .iter()
+        .map(|column| ColumnBinding::with_relations(column.name.clone(), relations.clone()))
+        .collect()
+}
+
+fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbError> {
+    let Statement::Select {
+        distinct,
+        columns,
+        from,
+        from_alias,
+        joins,
+        where_clause,
+        group_by,
+        having,
+        order_by,
+        order_by_exprs,
+        limit,
+        offset,
+    } = stmt
+    else {
+        unreachable!()
+    };
+
+    let (mut schema, mut input): (Vec<ColumnBinding>, Vec<QueryRow>) = if from.is_empty() {
+        if !joins.is_empty() {
+            return Err(dberr(
+                DbErrorKind::Syntax("JOIN requires a FROM table".into()),
+                "JOIN requires a FROM table",
+            ));
+        }
+        (Vec::new(), vec![QueryRow { values: Vec::new() }])
+    } else {
+        let base = state
+            .table(from)
+            .ok_or_else(|| dberr(DbErrorKind::UnknownTable, format!("no such table: {from}")))?;
+        let schema = relation_schema(base, from_alias.as_deref());
+        let base_plan = planner::choose(
+            base,
+            from_alias.as_deref().or(Some(from)),
+            where_clause.as_ref(),
+        );
+        let base_rows: Vec<Row> = match base_plan.access {
+            AccessPath::TableScan => base.scan().map(|(_, row)| row.clone()).collect(),
+            AccessPath::IndexScan { row_ids, .. } | AccessPath::IndexRange { row_ids, .. } => {
+                row_ids
+                    .into_iter()
+                    .filter_map(|rid| base.get_row(rid).cloned())
+                    .collect()
+            }
+        };
+        let input = base_rows
+            .into_iter()
+            .map(|values| QueryRow { values })
+            .collect();
+        (schema, input)
+    };
+
+    for join in joins {
+        let right = state.table(&join.table).ok_or_else(|| {
+            dberr(
+                DbErrorKind::UnknownTable,
+                format!("no such table: {}", join.table),
+            )
+        })?;
+        let right_schema = relation_schema(right, join.alias.as_deref());
+        let mut joined_schema = schema.clone();
+        joined_schema.extend(right_schema.iter().cloned());
+        if let Some(on) = &join.on {
+            reject_aggregate(on, "JOIN ON")?;
+            eval::validate_with_schema(&joined_schema, on)?;
+        }
+        let right_rows: Vec<Row> = right.scan().map(|(_, row)| row.clone()).collect();
+        let mut next = Vec::new();
+        let mut matched_right = vec![false; right_rows.len()];
+        if join.kind == JoinKind::Right {
+            for (right_index, right_row) in right_rows.iter().enumerate() {
+                let mut matched = false;
+                for left in &input {
+                    let mut values = left.values.clone();
+                    values.extend(right_row.iter().cloned());
+                    if join_passes(&join.kind, &join.on, &joined_schema, &values)? {
+                        matched = true;
+                        next.push(QueryRow { values });
+                    }
+                }
+                if !matched {
+                    let mut values = vec![Value::Null; input_schema_width(&schema)];
+                    values.extend(right_row.iter().cloned());
+                    next.push(QueryRow { values });
+                }
+                matched_right[right_index] = matched;
+            }
+        } else {
+            for left in &input {
+                let mut matched = false;
+                for (right_index, right_row) in right_rows.iter().enumerate() {
+                    let mut values = left.values.clone();
+                    values.extend(right_row.iter().cloned());
+                    if join_passes(&join.kind, &join.on, &joined_schema, &values)? {
+                        matched = true;
+                        matched_right[right_index] = true;
+                        next.push(QueryRow { values });
+                    }
+                }
+                if (join.kind == JoinKind::Left || join.kind == JoinKind::Full) && !matched {
+                    let mut values = left.values.clone();
+                    values.extend(std::iter::repeat_n(Value::Null, right.columns.len()));
+                    next.push(QueryRow { values });
+                }
+            }
+            if join.kind == JoinKind::Full {
+                for (right_index, right_row) in right_rows.iter().enumerate() {
+                    if !matched_right[right_index] {
+                        let mut values = vec![Value::Null; input_schema_width(&schema)];
+                        values.extend(right_row.iter().cloned());
+                        next.push(QueryRow { values });
+                    }
+                }
+            }
+        }
+        schema = joined_schema;
+        input = next;
+    }
+
+    let expanded_items = match columns {
+        SelectItems::Star => Vec::new(),
+        SelectItems::List(items) => expand_select_items(&schema, items)?,
+    };
+    let effective_order: Vec<(Expr, bool)> = if !order_by_exprs.is_empty() {
+        order_by_exprs
+            .iter()
+            .map(|(expr, ascending)| {
+                (
+                    resolve_order_alias(expr.clone(), &expanded_items),
+                    *ascending,
+                )
+            })
+            .collect()
+    } else {
+        order_by
+            .iter()
+            .map(|(name, ascending)| (order_name_expr(name), *ascending))
+            .collect()
+    };
+    if let Some(predicate) = where_clause {
+        reject_aggregate(predicate, "WHERE")?;
+        eval::validate_with_schema(&schema, predicate)?;
+    }
+    for expr in group_by {
+        reject_aggregate(expr, "GROUP BY")?;
+        eval::validate_with_schema(&schema, expr)?;
+    }
+    if let Some(predicate) = having {
+        eval::validate_with_schema(&schema, predicate)?;
+    }
+    for expr in &expanded_items {
+        eval::validate_with_schema(&schema, expr)?;
+    }
+    for (expr, _) in &effective_order {
+        eval::validate_with_schema(&schema, expr)?;
+    }
+
+    let mut filtered = Vec::with_capacity(input.len());
+    for row in input {
+        if where_clause
+            .as_ref()
+            .map(|predicate| eval::where_matches_with_schema(&schema, &row.values, predicate))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            filtered.push(row.values);
+        }
+    }
+
+    let has_aggregate = match columns {
+        SelectItems::Star => false,
+        SelectItems::List(items) => items.iter().any(eval::contains_aggregate),
+    } || having.as_ref().is_some_and(eval::contains_aggregate);
+    let grouped = has_aggregate || !group_by.is_empty() || having.is_some();
+    let groups = make_groups(&schema, filtered, group_by, grouped)?;
+
+    let output_names = select_output_names(&schema, columns, &expanded_items);
+    let mut projected: Vec<(Row, Vec<Value>)> = Vec::new();
+    for group in groups {
+        if let Some(predicate) = having {
+            if !eval::eval_group(&schema, &group, predicate)?
+                .is_truthy()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+        let row = match columns {
+            SelectItems::Star => group.first().cloned().unwrap_or_default(),
+            SelectItems::List(_) => expanded_items
+                .iter()
+                .map(|expr| eval::eval_group(&schema, &group, expr))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let mut keys = Vec::with_capacity(effective_order.len());
+        for (expression, _) in &effective_order {
+            keys.push(eval::eval_group(&schema, &group, expression)?);
+        }
+        projected.push((row, keys));
+    }
+
+    if !effective_order.is_empty() {
+        projected.sort_by(|left, right| {
+            for (index, (_, ascending)) in effective_order.iter().enumerate() {
+                let mut ordering = left.1[index].cmp_value(&right.1[index]);
+                if !*ascending {
+                    ordering = ordering.reverse();
+                }
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            Ordering::Equal
+        });
+    }
+    let mut rows: Vec<Row> = projected.into_iter().map(|(row, _)| row).collect();
+    if *distinct {
+        let mut seen = Vec::new();
+        rows.retain(|row| {
+            if seen.contains(row) {
+                false
+            } else {
+                seen.push(row.clone());
+                true
+            }
+        });
+    }
+    if let Some(offset) = offset {
+        if *offset >= rows.len() as u64 {
+            rows.clear();
+        } else {
+            rows = rows.split_off(*offset as usize);
+        }
+    }
+    if let Some(limit) = limit {
+        rows.truncate(*limit as usize);
+    }
+    Ok(StatementResult::Select {
+        columns: output_names,
+        rows,
+    })
+}
+
+fn input_schema_width(schema: &[ColumnBinding]) -> usize {
+    schema.len()
+}
+
+fn join_passes(
+    kind: &JoinKind,
+    on: &Option<Expr>,
+    schema: &[ColumnBinding],
+    row: &Row,
+) -> Result<bool, DbError> {
+    match (kind, on) {
+        (JoinKind::Cross, _) => Ok(true),
+        (_, Some(on)) => eval::where_matches_with_schema(schema, row, on),
+        (_, None) => Ok(true),
+    }
+}
+
+fn make_groups(
+    schema: &[ColumnBinding],
+    rows: Vec<Row>,
+    group_by: &[Expr],
+    grouped: bool,
+) -> Result<Vec<Vec<Row>>, DbError> {
+    if !grouped {
+        return Ok(rows.into_iter().map(|row| vec![row]).collect());
+    }
+    if group_by.is_empty() {
+        return Ok(vec![rows]);
+    }
+    let mut groups: Vec<(Vec<Value>, Vec<Row>)> = Vec::new();
+    for row in rows {
+        let key = group_by
+            .iter()
+            .map(|expr| eval::eval_with_schema(schema, &row, expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some((_, values)) = groups.iter_mut().find(|(existing, _)| {
+            existing.len() == key.len()
+                && existing
+                    .iter()
+                    .zip(&key)
+                    .all(|(left, right)| left.cmp_value(right) == Ordering::Equal)
+        }) {
+            values.push(row);
+        } else {
+            groups.push((key, vec![row]));
+        }
+    }
+    Ok(groups.into_iter().map(|(_, rows)| rows).collect())
+}
+
+fn order_name_expr(name: &str) -> Expr {
+    if let Some((relation, column)) = name.split_once('.') {
+        Expr::ColumnRef {
+            relation: relation.to_string(),
+            column: column.to_string(),
+        }
+    } else {
+        Expr::Column(name.to_string())
+    }
+}
+
+fn resolve_order_alias(expr: Expr, items: &[Expr]) -> Expr {
+    let Expr::Column(name) = &expr else {
+        return expr;
+    };
+    for item in items {
+        if let Expr::Alias { expr: inner, alias } = item {
+            if alias.eq_ignore_ascii_case(name) {
+                return *inner.clone();
+            }
+        }
+    }
+    expr
+}
+
+fn expand_select_items(schema: &[ColumnBinding], items: &[Expr]) -> Result<Vec<Expr>, DbError> {
+    let mut expanded = Vec::new();
+    for item in items {
+        if let Expr::QualifiedWildcard(relation) = item {
+            let mut found = false;
+            for column in schema {
+                if column
+                    .relations
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(relation))
+                {
+                    found = true;
+                    expanded.push(Expr::ColumnRef {
+                        relation: relation.clone(),
+                        column: column.name.clone(),
+                    });
+                }
+            }
+            if !found {
+                return Err(dberr(
+                    DbErrorKind::UnknownTable,
+                    format!("no such table: {relation}"),
+                ));
+            }
+        } else {
+            expanded.push(item.clone());
+        }
+    }
+    Ok(expanded)
+}
+
+fn select_output_names(
+    schema: &[ColumnBinding],
+    columns: &SelectItems,
+    expanded: &[Expr],
+) -> Vec<String> {
+    match columns {
+        SelectItems::Star => schema.iter().map(|column| column.name.clone()).collect(),
+        SelectItems::List(items) => {
+            let mut names = Vec::new();
+            let mut expanded_index = 0usize;
+            for item in items {
+                if let Expr::QualifiedWildcard(relation) = item {
+                    names.extend(
+                        schema
+                            .iter()
+                            .filter(|column| {
+                                column
+                                    .relations
+                                    .iter()
+                                    .any(|value| value.eq_ignore_ascii_case(relation))
+                            })
+                            .map(|column| column.name.clone()),
+                    );
+                    expanded_index += names.len().saturating_sub(expanded_index);
+                } else if let Some(expr) = expanded.get(expanded_index) {
+                    names.push(expr_label(expr));
+                    expanded_index += 1;
+                }
+            }
+            names
+        }
+    }
+}
+
+fn expr_label(expr: &Expr) -> String {
+    match expr {
+        Expr::Column(name) => name.clone(),
+        Expr::ColumnRef { relation, column } => format!("{relation}.{column}"),
+        Expr::QualifiedWildcard(relation) => format!("{relation}.*"),
+        Expr::Alias { alias, .. } => alias.clone(),
+        Expr::Function { name, .. } => name.clone(),
+        Expr::Literal(value) => value.to_string(),
+        _ => "expr".into(),
+    }
+}
+
+fn exec_update(
+    state: &mut State,
+    table_name: &str,
+    assignments: &[(String, Expr)],
+    where_clause: &Option<Expr>,
+) -> Result<StatementResult, DbError> {
+    let targets = {
+        let table = state.table(table_name).ok_or_else(|| {
+            dberr(
+                DbErrorKind::UnknownTable,
+                format!("no such table: {table_name}"),
+            )
+        })?;
+        let targets = assignments
+            .iter()
+            .map(|(name, _)| table.column_index(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_unique_columns(&targets, "UPDATE assignment list")?;
+        let schema = eval::schema_for_table(table);
+        for (_, expr) in assignments {
+            reject_aggregate(expr, "UPDATE")?;
+            eval::validate_with_schema(&schema, expr)?;
+        }
+        if let Some(predicate) = where_clause {
+            reject_aggregate(predicate, "WHERE")?;
+            eval::validate_with_schema(&schema, predicate)?;
+        }
+        targets
+    };
+    let mut plan = Vec::new();
+    {
+        let table = state.table(table_name).unwrap();
+        for (rid, row) in table.scan() {
+            if where_clause
+                .as_ref()
+                .map(|predicate| eval::where_matches(table, row, predicate))
+                .transpose()?
+                .unwrap_or(true)
+            {
+                let mut new_row = row.clone();
+                for (index, (_, expr)) in assignments.iter().enumerate() {
+                    let value = eval::eval(table, row, expr)?;
+                    new_row[targets[index]] = table.coerce_val(&value, targets[index])?;
+                }
+                plan.push((rid, new_row));
+            }
+        }
+    }
+    let table = state.table_mut(table_name).unwrap();
+    let mut candidate = table.clone();
+    let affected = plan.len();
+    for (rid, row) in plan {
+        candidate.replace_row(rid, row)?;
+    }
+    *table = candidate;
+    Ok(StatementResult::Update {
+        rows_affected: affected,
+    })
+}
+
+fn ensure_unique_columns(indices: &[usize], label: &str) -> Result<(), DbError> {
+    let mut seen = HashSet::with_capacity(indices.len());
+    if indices.iter().any(|index| !seen.insert(*index)) {
+        return Err(dberr(
+            DbErrorKind::Constraint,
+            format!("{label} contains a duplicate column"),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_aggregate(expr: &Expr, context: &str) -> Result<(), DbError> {
+    if eval::contains_aggregate(expr) {
+        return Err(dberr(
+            DbErrorKind::Syntax(format!("aggregate functions are not allowed in {context}")),
+            format!("aggregate functions are not allowed in {context}"),
+        ));
+    }
+    Ok(())
+}
+
+fn exec_delete(
+    state: &mut State,
+    table_name: &str,
+    where_clause: &Option<Expr>,
+) -> Result<StatementResult, DbError> {
+    let mut ids = Vec::new();
+    {
+        let table = state.table(table_name).ok_or_else(|| {
+            dberr(
+                DbErrorKind::UnknownTable,
+                format!("no such table: {table_name}"),
+            )
+        })?;
+        let schema = eval::schema_for_table(table);
+        if let Some(predicate) = where_clause {
+            reject_aggregate(predicate, "WHERE")?;
+            eval::validate_with_schema(&schema, predicate)?;
+        }
+        for (rid, row) in table.scan() {
+            if where_clause
+                .as_ref()
+                .map(|predicate| eval::where_matches(table, row, predicate))
+                .transpose()?
+                .unwrap_or(true)
+            {
+                ids.push(rid);
+            }
+        }
+    }
+    let table = state.table_mut(table_name).unwrap();
+    let mut candidate = table.clone();
+    for rid in &ids {
+        candidate.delete_row(*rid)?;
+    }
+    *table = candidate;
+    Ok(StatementResult::Delete {
+        rows_affected: ids.len(),
+    })
+}

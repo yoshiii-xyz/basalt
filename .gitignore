@@ -1,1 +1,18 @@
-target
+/target/
+
+# Local database files
+*.db
+*.db-wal
+*.db.tmp
+*.basalt
+*.basalt-wal
+*.basalt.tmp
+*.tmp
+
+# Editors and local tooling
+.DS_Store
+.idea/
+.vscode/
+*.swp
+coverage/
+*.profraw

@@ -36,9 +36,9 @@ impl Value {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
             (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-            (Value::Real(a), Value::Real(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (Value::Integer(a), Value::Real(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
-            (Value::Real(a), Value::Integer(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+            (Value::Real(a), Value::Real(b)) => cmp_real(*a, *b),
+            (Value::Integer(a), Value::Real(b)) => cmp_real(*a as f64, *b),
+            (Value::Real(a), Value::Integer(b)) => cmp_real(*a, *b as f64),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             _ => rank(self).cmp(&rank(other)),
         }
@@ -58,22 +58,44 @@ impl Value {
     pub fn coerce_to(&self, ty: &ColumnType) -> Result<Value, String> {
         match (ty, self) {
             (ColumnType::Null | ColumnType::Any, _) => Ok(self.clone()),
-            (ColumnType::Integer, Value::Integer(_)) | (ColumnType::Integer, Value::Null) => Ok(self.clone()),
+            (ColumnType::Integer, Value::Integer(_)) | (ColumnType::Integer, Value::Null) => {
+                Ok(self.clone())
+            }
             (ColumnType::Integer, Value::Boolean(b)) => Ok(Value::Integer(*b as i64)),
             (ColumnType::Integer, Value::Real(f)) => Ok(Value::Integer(*f as i64)),
-            (ColumnType::Integer, Value::Text(t)) => t.parse::<i64>().map(Value::Integer).map_err(|_| format!("cannot convert {t:?} to INTEGER")),
-            (ColumnType::Real, Value::Real(_)) | (ColumnType::Real, Value::Null) => Ok(self.clone()),
+            (ColumnType::Integer, Value::Text(t)) => t
+                .parse::<i64>()
+                .map(Value::Integer)
+                .map_err(|_| format!("cannot convert {t:?} to INTEGER")),
+            (ColumnType::Real, Value::Real(_)) | (ColumnType::Real, Value::Null) => {
+                Ok(self.clone())
+            }
             (ColumnType::Real, Value::Integer(i)) => Ok(Value::Real(*i as f64)),
-            (ColumnType::Real, Value::Text(t)) => t.parse::<f64>().map(Value::Real).map_err(|_| format!("cannot convert {t:?} to REAL")),
-            (ColumnType::Text, Value::Text(_)) | (ColumnType::Text, Value::Null) => Ok(self.clone()),
+            (ColumnType::Real, Value::Boolean(_)) => {
+                Err("cannot convert BOOLEAN to REAL".to_string())
+            }
+            (ColumnType::Real, Value::Text(t)) => t
+                .parse::<f64>()
+                .map(Value::Real)
+                .map_err(|_| format!("cannot convert {t:?} to REAL")),
+            (ColumnType::Text, Value::Text(_)) | (ColumnType::Text, Value::Null) => {
+                Ok(self.clone())
+            }
             (ColumnType::Text, v) => Ok(Value::Text(v.to_string())),
-            (ColumnType::Boolean, Value::Boolean(_)) | (ColumnType::Boolean, Value::Null) => Ok(self.clone()),
+            (ColumnType::Boolean, Value::Boolean(_)) | (ColumnType::Boolean, Value::Null) => {
+                Ok(self.clone())
+            }
             (ColumnType::Boolean, Value::Integer(i)) => Ok(Value::Boolean(*i != 0)),
-            (ColumnType::Boolean, v) => Err(format!("cannot convert {} to BOOLEAN", v.type_name())),
-            (ColumnType::Any, v) => Ok(v.clone()),
-            (_, v) => Err(format!("cannot convert {} to {:?}", v.type_name(), ty)),
+            (ColumnType::Boolean, Value::Real(_)) | (ColumnType::Boolean, Value::Text(_)) => {
+                Err(format!("cannot convert {} to BOOLEAN", self.type_name()))
+            }
         }
     }
+}
+
+fn cmp_real(left: f64, right: f64) -> std::cmp::Ordering {
+    left.partial_cmp(&right)
+        .unwrap_or_else(|| left.total_cmp(&right))
 }
 
 impl fmt::Display for Value {
