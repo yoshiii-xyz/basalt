@@ -108,6 +108,16 @@ fn type_coercion_on_insert() {
 }
 
 #[test]
+fn numeric_literals_support_exponents_and_minimum_integer() {
+    let mut db = State::empty();
+    let (_, rows) = selected(&mut db, "SELECT .5, 1e3, 1.25E-2, -9223372036854775808");
+    assert_eq!(
+        rows,
+        vec![vec!["0.5", "1000", "0.0125", "-9223372036854775808"]]
+    );
+}
+
+#[test]
 fn select_where_projection_order_limit() {
     let mut db = State::empty();
     run(

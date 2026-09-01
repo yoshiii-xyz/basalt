@@ -2,8 +2,8 @@
 //!
 //! A frame is considered committed only after its complete payload and CRC
 //! have reached the WAL file.  Recovery accepts valid complete frames and
-//! ignores an incomplete final frame, which is the normal result of a killed
-//! process during append.
+//! repairs and ignores an incomplete final frame, which is the normal result
+//! of a killed process during append.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -69,6 +69,7 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
     let mut latest = None;
     while offset < bytes.len() {
         if bytes.len() - offset < HEADER {
+            truncate_to(path, offset)?;
             break;
         }
         if &bytes[offset..offset + 4] != MAGIC {
@@ -83,7 +84,10 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
         let checksum = u32_at(&bytes, offset + 24)?;
         let end = match offset.checked_add(HEADER).and_then(|n| n.checked_add(len)) {
             Some(end) if end <= bytes.len() => end,
-            _ => break,
+            _ => {
+                truncate_to(path, offset)?;
+                break;
+            }
         };
         let payload = &bytes[offset + HEADER..end];
         if crc32(payload) != checksum {
@@ -115,6 +119,17 @@ pub fn truncate(path: &Path) -> Result<(), DbError> {
         .map_err(|e| io_error("truncate WAL", e))?;
     file.sync_all()
         .map_err(|e| io_error("sync truncated WAL", e))
+}
+
+fn truncate_to(path: &Path, length: usize) -> Result<(), DbError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| io_error("open WAL for tail repair", e))?;
+    file.set_len(length as u64)
+        .map_err(|e| io_error("truncate incomplete WAL frame", e))?;
+    file.sync_all()
+        .map_err(|e| io_error("sync repaired WAL", e))
 }
 
 fn corrupt(message: &str) -> DbError {
@@ -169,6 +184,28 @@ mod tests {
         *bytes.last_mut().unwrap() ^= 1;
         fs::write(&path, bytes).unwrap();
         assert!(latest(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repairs_a_torn_tail_before_a_later_commit() {
+        let dir = std::env::temp_dir().join(format!("basalt-wal-tail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        append(&path, 1, b"one").unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"BSWL")
+            .unwrap();
+
+        assert_eq!(latest(&path).unwrap().unwrap().generation, 1);
+        append(&path, 2, b"two").unwrap();
+        let frame = latest(&path).unwrap().unwrap();
+        assert_eq!(frame.generation, 2);
+        assert_eq!(frame.payload, b"two");
         let _ = fs::remove_dir_all(dir);
     }
 }

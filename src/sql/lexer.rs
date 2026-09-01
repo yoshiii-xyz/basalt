@@ -4,7 +4,7 @@ pub enum Token {
     Ident(String),
     /// Quoted identifier: "col name" or [col name]
     QuotedIdent(String),
-    Integer(i64),
+    Integer(i128),
     Real(f64),
     Str(String),
     // punctuation / operators
@@ -106,6 +106,11 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
             b'%' => {
                 out.push_tok(Token::Percent, i);
                 i += 1;
+            }
+            b'.' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() => {
+                let (token, end) = scan_number(input, i)?;
+                out.push_tok(token, i);
+                i = end;
             }
             b'.' => {
                 out.push_tok(Token::Dot, i);
@@ -244,35 +249,9 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                 out.push_tok(Token::QuotedIdent(s), start);
             }
             b'0'..=b'9' => {
-                let start = i;
-                let mut is_real = false;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                    if bytes[i] == b'.' {
-                        // reject things like 1.2.3
-                        if is_real {
-                            return Err(LexError {
-                                message: "malformed number".into(),
-                                offset: start,
-                            });
-                        }
-                        is_real = true;
-                    }
-                    i += 1;
-                }
-                let text = &input[start..i];
-                if is_real {
-                    let f: f64 = text.parse().map_err(|_| LexError {
-                        message: "malformed number".into(),
-                        offset: start,
-                    })?;
-                    out.push_tok(Token::Real(f), start);
-                } else {
-                    let n: i64 = text.parse().map_err(|_| LexError {
-                        message: "integer out of range".into(),
-                        offset: start,
-                    })?;
-                    out.push_tok(Token::Integer(n), start);
-                }
+                let (token, end) = scan_number(input, i)?;
+                out.push_tok(token, i);
+                i = end;
             }
             _ if b.is_ascii_alphabetic() || b == b'_' => {
                 let start = i;
@@ -308,6 +287,87 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
     }
     out.push_tok(Token::Eof, bytes.len());
     Ok(out)
+}
+
+fn scan_number(input: &str, start: usize) -> Result<(Token, usize), LexError> {
+    let bytes = input.as_bytes();
+    let mut i = start;
+    let mut is_real = false;
+
+    if bytes[i] == b'.' {
+        is_real = true;
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    } else {
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'.') {
+            is_real = true;
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+
+    if bytes
+        .get(i)
+        .is_some_and(|byte| *byte == b'e' || *byte == b'E')
+    {
+        is_real = true;
+        i += 1;
+        if bytes
+            .get(i)
+            .is_some_and(|byte| *byte == b'+' || *byte == b'-')
+        {
+            i += 1;
+        }
+        let exponent_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exponent_start {
+            return Err(LexError {
+                message: "malformed number exponent".into(),
+                offset: start,
+            });
+        }
+    }
+
+    if bytes.get(i) == Some(&b'.')
+        || bytes
+            .get(i)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+    {
+        return Err(LexError {
+            message: "malformed number".into(),
+            offset: start,
+        });
+    }
+
+    let text = &input[start..i];
+    if is_real {
+        let f: f64 = text.parse().map_err(|_| LexError {
+            message: "malformed number".into(),
+            offset: start,
+        })?;
+        if !f.is_finite() {
+            return Err(LexError {
+                message: "real number out of range".into(),
+                offset: start,
+            });
+        }
+        Ok((Token::Real(f), i))
+    } else {
+        let n: i128 = text.parse().map_err(|_| LexError {
+            message: "integer out of range".into(),
+            offset: start,
+        })?;
+        Ok((Token::Integer(n), i))
+    }
 }
 
 trait PushToken {
@@ -351,5 +411,22 @@ mod tests {
                 .iter()
                 .any(|span| span.token == Token::QuotedIdent("c]d".into()))
         );
+    }
+
+    #[test]
+    fn scans_decimal_and_exponent_literals() {
+        let tokens = lex("SELECT .5, 1., 1e3, 1.25E-2").unwrap();
+        assert!(tokens.iter().any(|span| span.token == Token::Real(0.5)));
+        assert!(tokens.iter().any(|span| span.token == Token::Real(1.0)));
+        assert!(tokens.iter().any(|span| span.token == Token::Real(1000.0)));
+        assert!(tokens.iter().any(|span| span.token == Token::Real(0.0125)));
+    }
+
+    #[test]
+    fn rejects_malformed_numbers() {
+        assert!(lex("1.2.3").is_err());
+        assert!(lex("1e").is_err());
+        assert!(lex("1foo").is_err());
+        assert!(lex("1e309").is_err());
     }
 }

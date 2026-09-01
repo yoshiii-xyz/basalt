@@ -413,7 +413,10 @@ impl Parser {
         }
         let limit = if self.accept_keyword("LIMIT") {
             match self.advance() {
-                Token::Integer(n) if n >= 0 => Some(n as u64),
+                Token::Integer(n) if n >= 0 => Some(u64::try_from(n).map_err(|_| ParseError {
+                    message: "LIMIT is out of range".into(),
+                    offset: self.cur_offset(),
+                })?),
                 _ => return self.err("LIMIT expects an integer"),
             }
         } else {
@@ -421,7 +424,10 @@ impl Parser {
         };
         let offset = if self.accept_keyword("OFFSET") {
             match self.advance() {
-                Token::Integer(n) if n >= 0 => Some(n as u64),
+                Token::Integer(n) if n >= 0 => Some(u64::try_from(n).map_err(|_| ParseError {
+                    message: "OFFSET is out of range".into(),
+                    offset: self.cur_offset(),
+                })?),
                 _ => return self.err("OFFSET expects a non-negative integer"),
             }
         } else {
@@ -566,6 +572,12 @@ impl Parser {
             });
         }
         if self.accept(&Token::Minus) {
+            if let Token::Integer(value) = self.cur() {
+                if *value == i64::MAX as i128 + 1 {
+                    self.advance();
+                    return Ok(Expr::Literal(Value::Integer(i64::MIN)));
+                }
+            }
             let e = self.parse_expr(UNARY_PREC)?;
             return Ok(Expr::Unary {
                 op: UnaryOp::Neg,
@@ -588,7 +600,11 @@ impl Parser {
         match self.cur().clone() {
             Token::Integer(n) => {
                 self.advance();
-                Ok(Expr::Literal(Value::Integer(n)))
+                let value = i64::try_from(n).map_err(|_| ParseError {
+                    message: "integer out of range".into(),
+                    offset: self.cur_offset(),
+                })?;
+                Ok(Expr::Literal(Value::Integer(value)))
             }
             Token::Real(f) => {
                 self.advance();
@@ -910,6 +926,25 @@ mod tests {
     fn null_true_false_and_is_null() {
         let s = one("SELECT * FROM t WHERE a IS NULL AND b IS NOT NULL AND c = NULL");
         assert!(matches!(s, Statement::Select { .. }));
+    }
+
+    #[test]
+    fn accepts_the_minimum_integer_literal() {
+        assert!(matches!(
+            one("SELECT -9223372036854775808"),
+            Statement::Select {
+                columns: SelectItems::List(items),
+                ..
+            } if items == vec![Expr::Literal(Value::Integer(i64::MIN))]
+        ));
+        assert!(parse("SELECT 9223372036854775808").is_err());
+        assert!(parse("SELECT -9223372036854775809").is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_limits() {
+        assert!(parse("SELECT 1 LIMIT 18446744073709551616").is_err());
+        assert!(parse("SELECT 1 OFFSET 18446744073709551616").is_err());
     }
 
     #[test]
