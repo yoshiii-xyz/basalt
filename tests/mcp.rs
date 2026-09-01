@@ -246,6 +246,7 @@ fn serves_legacy_stdio_clients_with_tools_resources_and_stateful_transactions() 
         result(&description)["structuredContent"]["columns"][0]["name"],
         "id"
     );
+    assert_eq!(result(&description)["structuredContent"]["name"], "users");
 
     server.close();
 }

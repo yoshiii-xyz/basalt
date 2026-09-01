@@ -323,13 +323,12 @@ struct QueryRow {
 
 fn relation_schema(table: &Table, alias: Option<&str>) -> Vec<ColumnBinding> {
     let mut relations = vec![table.name.clone()];
-    if let Some(alias) = alias {
-        if !relations
+    if let Some(alias) = alias
+        && !relations
             .iter()
             .any(|value| value.eq_ignore_ascii_case(alias))
-        {
-            relations.push(alias.to_string());
-        }
+    {
+        relations.push(alias.to_string());
     }
     table
         .columns
@@ -518,13 +517,12 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
     let output_names = select_output_names(&schema, columns, &expanded_items);
     let mut projected: Vec<(Row, Vec<Value>)> = Vec::new();
     for group in groups {
-        if let Some(predicate) = having {
-            if !eval::eval_group(&schema, &group, predicate)?
+        if let Some(predicate) = having
+            && !eval::eval_group(&schema, &group, predicate)?
                 .is_truthy()
                 .unwrap_or(false)
-            {
-                continue;
-            }
+        {
+            continue;
         }
         let row = match columns {
             SelectItems::Star => group.first().cloned().unwrap_or_default(),
@@ -648,10 +646,10 @@ fn resolve_order_alias(expr: Expr, items: &[Expr]) -> Expr {
         return expr;
     };
     for item in items {
-        if let Expr::Alias { expr: inner, alias } = item {
-            if alias.eq_ignore_ascii_case(name) {
-                return *inner.clone();
-            }
+        if let Expr::Alias { expr: inner, alias } = item
+            && alias.eq_ignore_ascii_case(name)
+        {
+            return *inner.clone();
         }
     }
     expr

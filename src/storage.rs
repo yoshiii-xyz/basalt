@@ -30,8 +30,15 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
     let payload = state.encode();
     let page_payload = PAGE_SIZE - PAGE_HEADER;
     let page_count = payload.len().div_ceil(page_payload).max(1);
+    let file_len = FILE_HEADER
+        .checked_add(
+            page_count
+                .checked_mul(PAGE_SIZE)
+                .ok_or_else(|| corrupt("database snapshot is too large"))?,
+        )
+        .ok_or_else(|| corrupt("database snapshot is too large"))?;
 
-    let mut bytes = vec![0u8; FILE_HEADER + page_count * PAGE_SIZE];
+    let mut bytes = vec![0u8; file_len];
     bytes[..8].copy_from_slice(FILE_MAGIC);
     bytes[8..12].copy_from_slice(&FILE_VERSION.to_le_bytes());
     bytes[12..16].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
@@ -66,13 +73,13 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
         .create(true)
         .truncate(true)
         .write(true)
-        .open(&tmp)
+        .open(tmp)
         .map_err(|e| io_error("open snapshot temporary file", e))?;
     file.write_all(&bytes)
         .map_err(|e| io_error("write snapshot", e))?;
     file.sync_all().map_err(|e| io_error("sync snapshot", e))?;
     drop(file);
-    fs::rename(&tmp, path).map_err(|e| io_error("install snapshot", e))?;
+    fs::rename(tmp, path).map_err(|e| io_error("install snapshot", e))?;
     sync_parent(path)
 }
 
@@ -102,8 +109,10 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
         return Err(corrupt("database header checksum mismatch"));
     }
     let generation = u64_at(&bytes, 16)?;
-    let payload_len = u64_at(&bytes, 24)? as usize;
-    let page_count = u64_at(&bytes, 32)? as usize;
+    let payload_len = usize::try_from(u64_at(&bytes, 24)?)
+        .map_err(|_| corrupt("database payload is too large"))?;
+    let page_count = usize::try_from(u64_at(&bytes, 32)?)
+        .map_err(|_| corrupt("database page count is too large"))?;
     if page_count == 0 || payload_len > page_count.saturating_mul(PAGE_SIZE - PAGE_HEADER) {
         return Err(corrupt("invalid database payload size"));
     }
@@ -125,8 +134,13 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
         if u64_at(&bytes, offset)? != page as u64 {
             return Err(corrupt("database page sequence mismatch"));
         }
-        let len = u64_at(&bytes, offset + 8)? as usize;
-        if len > PAGE_SIZE - PAGE_HEADER || payload.len() + len > payload_len {
+        let len = usize::try_from(u64_at(&bytes, offset + 8)?)
+            .map_err(|_| corrupt("database page is too large"))?;
+        let payload_end = payload
+            .len()
+            .checked_add(len)
+            .ok_or_else(|| corrupt("database payload is too large"))?;
+        if len > PAGE_SIZE - PAGE_HEADER || payload_end > payload_len {
             return Err(corrupt("invalid database page length"));
         }
         let checksum = u32_at(&bytes, offset + 16)?;
@@ -145,10 +159,9 @@ fn sync_parent(path: &Path) -> Result<(), DbError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
+        && let Ok(dir) = File::open(parent)
     {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let _ = dir.sync_all();
     }
     Ok(())
 }

@@ -501,7 +501,9 @@ impl Table {
         self.live -= 1;
         if self.pk.is_some() {
             let pk_idx = self.pk_col_idx().expect("has pk");
-            self.pk.as_mut().unwrap().delete(&row[pk_idx], rid);
+            if let Some(pk) = self.pk.as_mut() {
+                pk.delete(&row[pk_idx], rid);
+            }
         }
         for (cidx, tree) in &mut self.uniques {
             let k = row[*cidx].clone();
@@ -552,7 +554,9 @@ impl Table {
         let old = self.rows[idx].take().unwrap();
         if self.pk.is_some() {
             let pk_idx = self.pk_col_idx().expect("has pk");
-            self.pk.as_mut().unwrap().delete(&old[pk_idx], rid);
+            if let Some(pk) = self.pk.as_mut() {
+                pk.delete(&old[pk_idx], rid);
+            }
         }
         for (cidx, tree) in &mut self.uniques {
             let k = old[*cidx].clone();
@@ -565,7 +569,9 @@ impl Table {
         }
         if self.pk.is_some() {
             let pk_idx = self.pk_col_idx().expect("has pk");
-            self.pk.as_mut().unwrap().insert(new[pk_idx].clone(), rid);
+            if let Some(pk) = self.pk.as_mut() {
+                pk.insert(new[pk_idx].clone(), rid);
+            }
         }
         for (cidx, tree) in &mut self.uniques {
             let k = new[*cidx].clone();
@@ -601,7 +607,9 @@ impl Table {
         for (rid, row) in live {
             if self.pk.is_some() {
                 let pk_idx = self.pk_col_idx().expect("has pk");
-                self.pk.as_mut().unwrap().insert(row[pk_idx].clone(), rid);
+                if let Some(pk) = self.pk.as_mut() {
+                    pk.insert(row[pk_idx].clone(), rid);
+                }
             }
             for (cidx, tree) in &mut self.uniques {
                 let k = row[*cidx].clone();
@@ -753,6 +761,14 @@ impl Table {
                     format!("column '{}' violates NOT NULL", column.name),
                 ));
             }
+            if column.ty == ColumnType::Real
+                && matches!(values[i], Value::Real(value) if !value.is_finite())
+            {
+                return Err(DbError::new(
+                    DbErrorKind::TypeMismatch,
+                    format!("column '{}' cannot store a non-finite REAL", column.name),
+                ));
+            }
         }
         if let Some(pk) = &self.pk {
             let idx = self.pk_col_idx().expect("has pk");
@@ -810,20 +826,19 @@ impl Table {
     }
 
     fn validate_indexes(&self) -> Result<(), DbError> {
-        if let Some(pk) = &self.pk {
-            if pk
+        if let Some(pk) = &self.pk
+            && pk
                 .scan_all()
                 .windows(2)
                 .any(|pair| pair[0].0.cmp_value(&pair[1].0) == std::cmp::Ordering::Equal)
-            {
-                return Err(dberr(
-                    DbErrorKind::Io("duplicate primary key".into()),
-                    format!(
-                        "corrupt database: duplicate primary key in table '{}'",
-                        self.name
-                    ),
-                ));
-            }
+        {
+            return Err(dberr(
+                DbErrorKind::Io("duplicate primary key".into()),
+                format!(
+                    "corrupt database: duplicate primary key in table '{}'",
+                    self.name
+                ),
+            ));
         }
         for (idx, tree) in &self.uniques {
             if tree

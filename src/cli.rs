@@ -634,7 +634,7 @@ fn render_csv(
         write_csv_row(columns.iter().map(String::as_str), output)?;
     }
     for row in rows {
-        write_csv_row(row.iter().map(|value| value_text(value)), output)?;
+        write_csv_row(row.iter().map(value_text), output)?;
     }
     Ok(())
 }

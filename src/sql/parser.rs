@@ -55,11 +55,11 @@ impl Parser {
     }
 
     fn accept_keyword(&mut self, kw: &str) -> bool {
-        if let Token::Ident(s) = self.cur() {
-            if s.eq_ignore_ascii_case(kw) {
-                self.advance();
-                return true;
-            }
+        if let Token::Ident(s) = self.cur()
+            && s.eq_ignore_ascii_case(kw)
+        {
+            self.advance();
+            return true;
         }
         false
     }
@@ -572,11 +572,11 @@ impl Parser {
             });
         }
         if self.accept(&Token::Minus) {
-            if let Token::Integer(value) = self.cur() {
-                if *value == i64::MAX as i128 + 1 {
-                    self.advance();
-                    return Ok(Expr::Literal(Value::Integer(i64::MIN)));
-                }
+            if let Token::Integer(value) = self.cur()
+                && *value == i64::MAX as i128 + 1
+            {
+                self.advance();
+                return Ok(Expr::Literal(Value::Integer(i64::MIN)));
             }
             let e = self.parse_expr(UNARY_PREC)?;
             return Ok(Expr::Unary {

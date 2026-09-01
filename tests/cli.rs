@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+use basalt::Database;
+
 struct TempDir {
     path: std::path::PathBuf,
 }
@@ -127,6 +129,27 @@ fn invalid_batch_sql_returns_a_failure_status() {
             .unwrap()
             .contains("command line")
     );
+}
+
+#[test]
+fn durable_database_is_exclusive_across_processes() {
+    let dir = TempDir::new("cli-lock");
+    let database = dir.path("app.db");
+    let path = database.to_str().unwrap();
+    let owner = Database::open(&database).unwrap();
+
+    let output = run(&["--quiet", "-c", "SELECT 1", path]);
+    assert!(
+        !output.status.success(),
+        "second process unexpectedly opened the database"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("already open")
+    );
+
+    drop(owner);
 }
 
 fn unique_suffix() -> u128 {

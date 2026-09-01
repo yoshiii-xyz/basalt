@@ -118,6 +118,14 @@ fn numeric_literals_support_exponents_and_minimum_integer() {
 }
 
 #[test]
+fn real_overflow_and_non_finite_coercion_fail_cleanly() {
+    let mut db = State::empty();
+    assert!(run_err(&mut db, "SELECT 1e308 * 1e308").contains("overflow"));
+    run(&mut db, "CREATE TABLE t (value REAL)");
+    assert!(run_err(&mut db, "INSERT INTO t VALUES ('NaN')").contains("cannot convert"));
+}
+
+#[test]
 fn select_where_projection_order_limit() {
     let mut db = State::empty();
     run(

@@ -69,7 +69,9 @@ basalt --json --command "SELECT * FROM users ORDER BY id;" app.basalt
 
 Use `Database::in_memory()` for an ephemeral database. Durable writes are
 appended to the WAL immediately; call `checkpoint()` to fold the current state
-into the snapshot and clear old WAL frames.
+into the snapshot and clear old WAL frames. A durable path is owned by one
+process at a time; cloned `Database` handles share that owner safely across
+threads, while a second process receives an "already open" error.
 
 ## MCP server
 
@@ -153,6 +155,7 @@ calls.
 | src/storage.rs, src/wal.rs | Snapshots, checksums, and recovery |
 | src/cli.rs | Interactive and scripted command-line frontend |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
+| docs/sql.md | Supported SQL dialect and transaction semantics |
 | docs/mcp.md | MCP installation, configuration, and tool contract |
 | tests/ | Integration and crash-recovery coverage |
 | benches/ | Throughput benchmark |
@@ -168,7 +171,8 @@ cargo bench --bench throughput
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
-[CHANGELOG.md](CHANGELOG.md) for project history.
+[CHANGELOG.md](CHANGELOG.md) for project history. The release checklist is in
+[docs/release.md](docs/release.md).
 
 ## License
 

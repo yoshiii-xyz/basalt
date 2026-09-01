@@ -9,6 +9,7 @@
 *.basalt.tmp
 *.tmp
 *.wal
+*.lock
 
 # Editors and local tooling
 .DS_Store

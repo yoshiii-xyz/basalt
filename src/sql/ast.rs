@@ -1,5 +1,6 @@
 use crate::types::{ColumnType, Value};
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     CreateTable {

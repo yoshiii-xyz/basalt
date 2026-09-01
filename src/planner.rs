@@ -9,6 +9,8 @@ use crate::db::Table;
 use crate::sql::ast::{BinOp, Expr};
 use crate::types::Value;
 
+type RangeCandidate = (usize, Option<Value>, Option<Value>, Vec<u64>, String);
+
 #[derive(Debug, Clone)]
 pub enum AccessPath {
     TableScan,
@@ -64,24 +66,23 @@ pub fn choose(table: &Table, relation: Option<&str>, predicate: Option<&Expr>) -
     if let Some(predicate) = predicate {
         find_range(table, relation, predicate, &mut range);
     }
-    if let Some((column, low, high, row_ids, index_name)) = range {
-        if row_ids.len().saturating_mul(2) <= full_scan_cost
-            && best
-                .as_ref()
-                .map(|(estimated, _)| row_ids.len() < *estimated)
-                .unwrap_or(true)
-        {
-            best = Some((
-                row_ids.len(),
-                AccessPath::IndexRange {
-                    index_name,
-                    column,
-                    low,
-                    high,
-                    row_ids,
-                },
-            ));
-        }
+    if let Some((column, low, high, row_ids, index_name)) = range
+        && row_ids.len().saturating_mul(2) <= full_scan_cost
+        && best
+            .as_ref()
+            .map(|(estimated, _)| row_ids.len() < *estimated)
+            .unwrap_or(true)
+    {
+        best = Some((
+            row_ids.len(),
+            AccessPath::IndexRange {
+                index_name,
+                column,
+                low,
+                high,
+                row_ids,
+            },
+        ));
     }
     if let Some((estimated_rows, access)) = best {
         return Plan {
@@ -117,17 +118,16 @@ fn find_equality(
             op: BinOp::Eq,
             right,
         } => {
-            if let Some((column_name, value)) = column_literal(left, right, relation) {
-                if let Ok(column) = table.column_index(column_name) {
-                    if let Some((index_name, row_ids)) = table.lookup_eq_index(column, value) {
-                        let is_better = candidate
-                            .as_ref()
-                            .map(|existing| row_ids.len() < existing.2.len())
-                            .unwrap_or(true);
-                        if is_better {
-                            *candidate = Some((column, value.clone(), row_ids, index_name));
-                        }
-                    }
+            if let Some((column_name, value)) = column_literal(left, right, relation)
+                && let Ok(column) = table.column_index(column_name)
+                && let Some((index_name, row_ids)) = table.lookup_eq_index(column, value)
+            {
+                let is_better = candidate
+                    .as_ref()
+                    .map(|existing| row_ids.len() < existing.2.len())
+                    .unwrap_or(true);
+                if is_better {
+                    *candidate = Some((column, value.clone(), row_ids, index_name));
                 }
             }
         }
@@ -175,7 +175,7 @@ fn find_range(
     table: &Table,
     relation: Option<&str>,
     expr: &Expr,
-    candidate: &mut Option<(usize, Option<Value>, Option<Value>, Vec<u64>, String)>,
+    candidate: &mut Option<RangeCandidate>,
 ) {
     match expr {
         Expr::Binary {
@@ -204,17 +204,16 @@ fn find_range(
                 (BinOp::Gt | BinOp::GtEq, true) => (None, Some(value.clone())),
                 _ => unreachable!(),
             };
-            if let Ok(column) = table.column_index(column) {
-                if let Some((name, rows)) =
+            if let Ok(column) = table.column_index(column)
+                && let Some((name, rows)) =
                     table.lookup_range_index(column, low.as_ref(), high.as_ref())
-                {
-                    let is_better = candidate
-                        .as_ref()
-                        .map(|existing| rows.len() < existing.3.len())
-                        .unwrap_or(true);
-                    if is_better {
-                        *candidate = Some((column, low, high, rows, name));
-                    }
+            {
+                let is_better = candidate
+                    .as_ref()
+                    .map(|existing| rows.len() < existing.3.len())
+                    .unwrap_or(true);
+                if is_better {
+                    *candidate = Some((column, low, high, rows, name));
                 }
             }
         }

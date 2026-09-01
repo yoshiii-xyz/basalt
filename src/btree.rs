@@ -45,8 +45,7 @@ pub struct BTree {
 
 impl Default for BTree {
     fn default() -> Self {
-        let mut nodes = Vec::new();
-        nodes.push(Node::new(true));
+        let nodes = vec![Node::new(true)];
         BTree {
             nodes,
             root: 0,

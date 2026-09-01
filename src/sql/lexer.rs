@@ -337,11 +337,11 @@ fn scan_number(input: &str, start: usize) -> Result<(Token, usize), LexError> {
         }
     }
 
-    if bytes.get(i) == Some(&b'.')
-        || bytes
-            .get(i)
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-    {
+    let identifier_follows = input
+        .get(i..)
+        .and_then(|remaining| remaining.chars().next())
+        .is_some_and(|character| character.is_alphanumeric() || character == '_');
+    if bytes.get(i) == Some(&b'.') || identifier_follows {
         return Err(LexError {
             message: "malformed number".into(),
             offset: start,

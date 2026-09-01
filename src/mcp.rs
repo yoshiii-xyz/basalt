@@ -382,11 +382,19 @@ impl BasaltMcp {
         let database = self.database.clone();
         tokio::task::spawn_blocking(move || {
             with_connection(&connection, |_| {
+                let name = database
+                    .table_names()
+                    .map_err(|error| format!("could not describe table: {error}"))?
+                    .into_iter()
+                    .find(|name| name.eq_ignore_ascii_case(&input.table))
+                    .ok_or_else(|| {
+                        format!("could not describe table: no such table: {}", input.table)
+                    })?;
                 let columns = database
-                    .columns(&input.table)
+                    .columns(&name)
                     .map_err(|error| format!("could not describe table: {error}"))?;
                 let response = TableInfo {
-                    name: input.table,
+                    name,
                     columns: columns.into_iter().map(column_info).collect(),
                 };
                 ensure_output_size(&response, "table metadata")?;

@@ -136,7 +136,9 @@ risk, but the host remains responsible for approval policy.
 Use a durable path for work that must survive process restarts. Basalt appends
 committed writes to its WAL; call `checkpoint` when you want to fold the state
 into the snapshot and remove old WAL frames. `checkpoint` is a no-op for
-`:memory:`.
+`:memory:`. A durable path is exclusively owned by one process; a second CLI
+or MCP process receives an "already open" error instead of competing for the
+same WAL.
 
 ## Troubleshooting
 

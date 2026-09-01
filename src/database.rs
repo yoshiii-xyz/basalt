@@ -6,6 +6,7 @@
 //! therefore never observe half of a write, and concurrent writers fail with a
 //! transaction conflict instead of silently losing updates.
 
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -18,6 +19,7 @@ use crate::{storage, wal};
 struct Inner {
     path: Option<PathBuf>,
     wal_path: Option<PathBuf>,
+    _lock_file: Option<File>,
     state: RwLock<State>,
     generation: AtomicU64,
     commit_lock: Mutex<()>,
@@ -36,6 +38,7 @@ impl Database {
             inner: Arc::new(Inner {
                 path: None,
                 wal_path: None,
+                _lock_file: None,
                 state: RwLock::new(State::empty()),
                 generation: AtomicU64::new(0),
                 commit_lock: Mutex::new(()),
@@ -46,6 +49,7 @@ impl Database {
     /// Open or create a durable database at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DbError> {
         let path = path.as_ref().to_path_buf();
+        let lock_file = acquire_lock(&path)?;
         let wal_path = wal_path(&path);
         let frame = wal::latest(&wal_path)?;
         let snapshot = storage::read_snapshot(&path);
@@ -85,6 +89,7 @@ impl Database {
             inner: Arc::new(Inner {
                 path: Some(path),
                 wal_path: Some(wal_path),
+                _lock_file: Some(lock_file),
                 state: RwLock::new(state),
                 generation: AtomicU64::new(generation),
                 commit_lock: Mutex::new(()),
@@ -399,6 +404,46 @@ fn wal_path(path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn acquire_lock(path: &Path) -> Result<File, DbError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            dberr(
+                DbErrorKind::Io(format!("create database directory: {error}")),
+                format!("create database directory: {error}"),
+            )
+        })?;
+    }
+    let mut lock_os = path.as_os_str().to_os_string();
+    lock_os.push(".lock");
+    let lock_path = PathBuf::from(lock_os);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            dberr(
+                DbErrorKind::Io(format!("open database lock: {error}")),
+                format!("open database lock: {error}"),
+            )
+        })?;
+    match fs4::FileExt::try_lock(&file) {
+        Ok(()) => Ok(file),
+        Err(fs4::TryLockError::WouldBlock) => Err(dberr(
+            DbErrorKind::Transaction,
+            format!("database is already open: {}", path.display()),
+        )),
+        Err(fs4::TryLockError::Error(error)) => Err(dberr(
+            DbErrorKind::Io(format!("lock database: {error}")),
+            format!("lock database: {error}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +582,23 @@ mod tests {
         let result = database.execute_sql("SELECT * FROM t").unwrap();
         assert!(matches!(&result[0], StatementResult::Select { rows, .. } if rows.len() == 1));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn durable_database_rejects_a_second_open_handle() {
+        let dir = std::env::temp_dir().join(format!("basalt-db-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.db");
+        let first = Database::open(&path).unwrap();
+        let error = match Database::open(&path) {
+            Ok(_) => panic!("a second database open should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("already open"));
+        drop(first);
+        let second = Database::open(&path).unwrap();
+        drop(second);
+        let _ = fs::remove_dir_all(dir);
     }
 }

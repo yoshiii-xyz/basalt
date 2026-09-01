@@ -80,7 +80,14 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
             return Err(corrupt("unsupported WAL version"));
         }
         let generation = u64_at(&bytes, offset + 8)?;
-        let len = u64_at(&bytes, offset + 16)? as usize;
+        let declared_len = u64_at(&bytes, offset + 16)?;
+        let len = match usize::try_from(declared_len) {
+            Ok(len) => len,
+            Err(_) => {
+                truncate_to(path, offset)?;
+                break;
+            }
+        };
         let checksum = u32_at(&bytes, offset + 24)?;
         let end = match offset.checked_add(HEADER).and_then(|n| n.checked_add(len)) {
             Some(end) if end <= bytes.len() => end,

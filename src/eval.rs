@@ -252,7 +252,8 @@ fn apply_scalar_function(upper: &str, name: &str, values: Vec<Value>) -> Result<
                 .checked_abs()
                 .map(Value::Integer)
                 .ok_or_else(|| dberr(DbErrorKind::TypeMismatch, "integer overflow")),
-            [Value::Real(value)] => Ok(Value::Real(value.abs())),
+            [Value::Real(value)] if value.is_finite() => Ok(Value::Real(value.abs())),
+            [Value::Real(_)] => Err(dberr(DbErrorKind::TypeMismatch, "real overflow")),
             [Value::Null] => Ok(Value::Null),
             _ => Err(dberr(DbErrorKind::TypeMismatch, "ABS expects a number")),
         },
@@ -289,7 +290,8 @@ fn apply_unary(op: &UnaryOp, value: Value) -> Result<Value, DbError> {
                 .checked_neg()
                 .map(Value::Integer)
                 .ok_or_else(|| dberr(DbErrorKind::TypeMismatch, "integer overflow")),
-            Value::Real(value) => Ok(Value::Real(-value)),
+            Value::Real(value) if value.is_finite() => Ok(Value::Real(-value)),
+            Value::Real(_) => Err(dberr(DbErrorKind::TypeMismatch, "real overflow")),
             Value::Null => Ok(Value::Null),
             _ => Err(dberr(
                 DbErrorKind::TypeMismatch,
@@ -401,14 +403,18 @@ fn float_arithmetic(op: &BinOp, left: f64, right: f64) -> Result<Value, DbError>
     if matches!(op, Div | Mod) && right == 0.0 {
         return Ok(Value::Null);
     }
-    Ok(match op {
+    let value = match op {
         Add => Value::Real(left + right),
         Sub => Value::Real(left - right),
         Mul => Value::Real(left * right),
         Div => Value::Real(left / right),
         Mod => Value::Real(left % right),
         _ => unreachable!(),
-    })
+    };
+    if matches!(&value, Value::Real(value) if !value.is_finite()) {
+        return Err(dberr(DbErrorKind::TypeMismatch, "real overflow"));
+    }
+    Ok(value)
 }
 
 pub fn contains_aggregate(expr: &Expr) -> bool {
@@ -523,9 +529,17 @@ fn eval_aggregate(
                     Value::Real(value) => value,
                     _ => return Err(dberr(DbErrorKind::TypeMismatch, "AVG expects numbers")),
                 };
+                if !total.is_finite() {
+                    return Err(dberr(DbErrorKind::TypeMismatch, "real overflow"));
+                }
                 count += 1;
             }
-            Ok(Value::Real(total / count as f64))
+            let average = total / count as f64;
+            if average.is_finite() {
+                Ok(Value::Real(average))
+            } else {
+                Err(dberr(DbErrorKind::TypeMismatch, "real overflow"))
+            }
         }
         "MIN" | "MAX" => {
             let mut result = values[0].clone();
@@ -579,6 +593,9 @@ fn sum_values(values: Vec<Value>) -> Result<Value, DbError> {
                 Value::Real(value) => value,
                 _ => return Err(dberr(DbErrorKind::TypeMismatch, "SUM expects numbers")),
             };
+            if !total.is_finite() {
+                return Err(dberr(DbErrorKind::TypeMismatch, "real overflow"));
+            }
         }
         Ok(Value::Real(total))
     } else {
