@@ -1,62 +1,94 @@
-<p align="center">
-  <img src="assets/logo.png" alt="Basalt logo" width="160">
-</p>
-
-<h1 align="center">Basalt</h1>
+<div align="center">
+  <img src="assets/logo.png" alt="Basalt logo" width="128">
+  <h1>Basalt</h1>
+  <p>A small, durable embedded SQL database written in Rust.</p>
+  <p>
+    <a href="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml">
+      <img src="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml/badge.svg" alt="CI">
+    </a>
+    <a href="LICENSE">
+      <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license">
+    </a>
+  </p>
+</div>
 
 Basalt is a dependency-free embedded SQL database and command-line application
-written from scratch in Rust. It has a small public API, an interactive shell,
-scriptable output formats, snapshot-isolated transactions, checksummed pages,
-and a write-ahead log that recovers complete commits after a process crash.
+built from scratch in Rust. It provides a small library API, an interactive
+shell, durable storage, snapshot-isolated transactions, and crash recovery.
+It focuses on readable end-to-end implementation, durable behavior, and
+practical command-line use.
 
-[![CI](https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml/badge.svg)](https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+## Highlights
 
-Basalt is a small, focused project rather than a database compatibility
-replacement. Its goal is a readable end-to-end implementation with durable
-behavior, useful SQL, and a practical command-line interface.
+- SQL lexer and recursive-descent parser with expressions, joins, grouping,
+  aggregates, aliases, and transaction statements.
+- Atomic statement execution with primary-key, UNIQUE, and user-created
+  indexes.
+- Snapshot-isolated transactions with optimistic conflict detection.
+- Checksummed page snapshots and a write-ahead log that recovers committed
+  state after a process crash.
+- Simple query planning with table scans, equality indexes, and range indexes.
+- Interactive and scriptable CLI output in table, CSV, and JSON-lines formats.
+
+## Installation
+
+Rust 1.85 or newer is required.
+
+```bash
+cargo install --path .
+```
+
+To run directly from a checkout:
+
+```bash
+cargo run --release -- app.basalt
+```
 
 ## Quick start
 
-~~~text
-cargo run --release -- --help
-cargo run --release -- app.basalt
-~~~
+Open a database and run SQL interactively:
 
-Or install the binary locally:
+```console
+$ basalt app.basalt
+basalt> CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+basalt> INSERT INTO users VALUES (1, 'Ada');
+basalt> SELECT * FROM users;
+id | name
+---+-----
+1  | Ada
+1 row(s)
+```
 
-~~~text
-cargo install --path .
-basalt --file schema.sql app.basalt
-~~~
+For a one-shot command:
 
-## What is included
+```bash
+basalt --json --command "SELECT * FROM users ORDER BY id;" app.basalt
+```
 
-1. **SQL frontend** — UTF-8 lexer, comments, quoted identifiers, recursive
-   descent parser, precedence-aware expressions, DDL/DML, joins, grouping,
-   aggregates, aliases, and transaction statements.
-2. **Storage** — deterministic catalog/row serialization in a fixed-size page
-   container with per-page CRC-32 validation and corruption errors.
-3. **Executor** — scans, filters, projections, scalar functions,
-   `INSERT ... SELECT`, `UPDATE`, `DELETE`, ordering, `DISTINCT`,
-   `LIMIT/OFFSET`, and outer joins.
-4. **Indexes** — hand-written B+tree indexes, primary keys, column-level and
-   user-created UNIQUE indexes, and index maintenance across writes/reloads.
-5. **Transactions** — private snapshot transactions, atomic statements,
-   optimistic conflict detection, concurrent readers, and connection-scoped
-   `BEGIN`/`COMMIT`/`ROLLBACK`.
-6. **Durability** — append-only checksummed WAL frames, torn-tail handling,
-   atomic checkpoint installation, and recovery of the newest committed state.
-7. **Planner** — equality and range access-path selection with a simple cost
-   comparison, plus nested-loop inner/left/right/full/cross joins and grouped
-   aggregate execution.
-8. **CLI frontend** — interactive and non-interactive execution, SQL script
-   files, repeated commands, multiline buffering, table/CSV/JSON-lines output,
-   schema discovery, and shell state controls.
-9. **Proof** — unit and integration coverage for parser semantics, B+tree
-   mutation, constraints, atomicity, joins, aggregates, persistence, WAL
-   recovery, corruption boundaries, concurrent access, and the executable
-   frontend.
+Use `Database::in_memory()` for an ephemeral database. Durable writes are
+appended to the WAL immediately; call `checkpoint()` to fold the current state
+into the snapshot and clear old WAL frames.
+
+## CLI
+
+Execute a SQL file:
+
+```bash
+basalt --file schema-and-seed.sql app.basalt
+```
+
+Run commands in order on one connection, including a transaction spanning
+multiple commands:
+
+```bash
+basalt --command "BEGIN;" --command "INSERT INTO users VALUES (2, 'Grace');" --command "COMMIT;" app.basalt
+```
+
+Use `--file -` to read SQL from stdin. Repeat `--command` and `--file` as
+needed; they execute in the order they appear. Table output is human-readable,
+CSV emits query rows, and `--json` emits one JSON object per statement. Run
+`.help` inside the shell for `.tables`, `.schema`, `.mode`, `.headers`,
+`.checkpoint`, `.show`, and `.clear`.
 
 ## Library usage
 
@@ -65,8 +97,7 @@ use basalt::{Database, db::StatementResult};
 
 let database = Database::open("example.basalt")?;
 database.execute_sql(
-    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\
-     INSERT INTO users VALUES (1, 'Ada');",
+    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL); INSERT INTO users VALUES (1, 'Ada');",
 )?;
 let result = database.execute_sql("SELECT * FROM users WHERE id = 1")?;
 assert!(matches!(result[0], StatementResult::Select { .. }));
@@ -74,73 +105,35 @@ database.checkpoint()?;
 # Ok::<(), basalt::db::DbError>(())
 ```
 
-Use `Database::in_memory()` for an ephemeral database. Use
-`database.connect()` when SQL transaction statements need to span multiple
-calls. Every autocommit write is durable in the WAL immediately; call
-`checkpoint()` to fold it into the page file and truncate old WAL frames.
+Use `database.connect()` when SQL transaction statements need to span multiple
+calls.
 
-## Command-line frontend
+## Project layout
 
-Start an in-memory interactive session:
+| Path | Purpose |
+| --- | --- |
+| src/sql/ | Lexer, parser, AST, and SQL dialect |
+| src/engine.rs | Statement execution and query semantics |
+| src/planner.rs | Access-path selection |
+| src/db.rs, src/database.rs | Tables, constraints, transactions, and API |
+| src/storage.rs, src/wal.rs | Snapshots, checksums, and recovery |
+| src/cli.rs | Interactive and scripted command-line frontend |
+| tests/ | Integration and crash-recovery coverage |
+| benches/ | Throughput benchmark |
 
-```text
-cargo run --release -- example.basalt
-basalt> CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
-basalt> SELECT * FROM t;
-```
+## Development
 
-The shell accepts multiline SQL when a statement contains an open quoted
-literal or parenthesized expression, and top-level semicolons can separate
-multiple statements. SQL without a semicolon is also executed when it is
-complete. Run .help for all commands; useful commands include .tables,
-.schema [TABLE], .mode table|csv|json, .headers on|off, .checkpoint,
-.show, .clear, and .quit.
-
-The same frontend works in automation:
-
-```text
-# Execute a script against a durable database.
-basalt --file schema-and-seed.sql app.basalt
-
-# Run commands in order on one connection (transactions can span commands).
-basalt --command "BEGIN;" --command "INSERT INTO t VALUES (1, 'one');" --command "COMMIT;" app.basalt
-
-# Produce machine-readable output.
-basalt --json --command "SELECT * FROM t ORDER BY id;" app.basalt
-basalt --csv --quiet --command "SELECT * FROM t;" app.basalt
-```
-
-The option --file - reads SQL from stdin. The options --command and --file may
-be repeated and execute in the order they appear. Table output is
-human-readable, CSV emits only query rows, and JSON emits one object per
-statement (JSON Lines). Batch errors are written to stderr and return a
-non-zero exit status; --quiet suppresses successful non-query messages.
-
-EXPLAIN SELECT ... reports the chosen table or index access path in every
-output mode.
-
-## Repository layout
-
-- src/sql/ - lexer, parser, AST, and SQL dialect
-- src/engine.rs - execution and query semantics
-- src/planner.rs - access-path selection
-- src/db.rs, src/database.rs - tables, constraints, transactions, and API
-- src/storage.rs, src/wal.rs - snapshots, checksums, and recovery
-- src/cli.rs - interactive and scripted command-line frontend
-- tests/ - integration, crash-recovery, and executable frontend coverage
-- benches/ - repeatable throughput benchmark
-
-## Verification
-
-The project intentionally has no external dependencies:
-
-```text
+```bash
 cargo fmt --all -- --check
 cargo check --all-targets
 cargo test --all-targets
+cargo doc --no-deps
 cargo bench --bench throughput
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
+[CHANGELOG.md](CHANGELOG.md) for project history.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
