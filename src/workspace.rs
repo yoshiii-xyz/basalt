@@ -24,6 +24,7 @@ use crate::db::{Column, DbError, StatementResult};
 use crate::engine::{ExecutionBudget, MCP_EXECUTION_WORK_LIMIT};
 use crate::sql::ast::Statement;
 use crate::sql::parser::parse;
+use crate::storage;
 use crate::types::{ColumnType, Value};
 
 const MANIFEST_FILE: &str = "workspace.json";
@@ -31,6 +32,8 @@ const DATABASE_FILE: &str = "data.basalt";
 const WORKSPACE_LOCK_FILE: &str = ".workspace.lock";
 const FORMAT_VERSION: u32 = 1;
 const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_HISTORY_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const MAX_MCP_IMPORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MCP_IMPORT_ROWS: usize = 10_000;
 const MAX_MCP_IMPORT_COLUMNS: usize = 256;
@@ -206,16 +209,18 @@ impl Workspace {
                 "workspace manifest cannot be a symbolic link".to_string(),
             ));
         }
-        let bytes = fs::read(&manifest_path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                WorkspaceError::Invalid(format!(
-                    "not a Basalt workspace: missing {}",
-                    manifest_path.display()
-                ))
-            } else {
-                WorkspaceError::Io(error)
-            }
-        })?;
+        let bytes = read_file_limited(&manifest_path, MAX_MANIFEST_BYTES, "workspace manifest")
+            .map_err(|error| {
+                if matches!(&error, WorkspaceError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+                {
+                    WorkspaceError::Invalid(format!(
+                        "not a Basalt workspace: missing {}",
+                        manifest_path.display()
+                    ))
+                } else {
+                    error
+                }
+            })?;
         let manifest: WorkspaceManifest = serde_json::from_slice(&bytes).map_err(|error| {
             WorkspaceError::Invalid(format!(
                 "invalid workspace manifest {}: {error}",
@@ -959,6 +964,39 @@ fn read_source<R: Read>(source: &Path, input: &mut R) -> Result<Vec<u8>, Workspa
     }
     let mut file = File::open(source)?;
     read_limited(&mut file)
+}
+
+fn read_file_limited(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, WorkspaceError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(WorkspaceError::Invalid(format!(
+            "{label} cannot be a symbolic link: {}",
+            path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(WorkspaceError::Invalid(format!(
+            "{label} is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(WorkspaceError::Invalid(format!(
+            "{label} exceeds the {max_bytes}-byte limit: {}",
+            path.display()
+        )));
+    }
+    let file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(WorkspaceError::Invalid(format!(
+            "{label} exceeds the {max_bytes}-byte limit: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn read_limited<R: Read>(reader: &mut R) -> Result<Vec<u8>, WorkspaceError> {
@@ -1759,7 +1797,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkspaceEr
             path.display()
         )));
     }
-    let bytes = fs::read(path)?;
+    let bytes = read_file_limited(path, MAX_HISTORY_METADATA_BYTES, "workspace metadata")?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -1782,7 +1820,14 @@ fn state_fingerprint(path: &Path) -> Result<String, WorkspaceError> {
             path.display()
         )));
     }
-    Ok(format!("sha256:{}", sha256_bytes(&fs::read(path)?)))
+    Ok(format!(
+        "sha256:{}",
+        sha256_bytes(&read_file_limited(
+            path,
+            storage::MAX_SNAPSHOT_BYTES as u64,
+            "workspace state",
+        )?)
+    ))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -1877,15 +1922,18 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<(), WorkspaceError> 
             "workspace recovery files cannot be symbolic links".to_string(),
         ));
     }
-    let bytes = fs::read(source)?;
+    let bytes = read_file_limited(
+        source,
+        storage::MAX_SNAPSHOT_BYTES as u64,
+        "workspace recovery snapshot",
+    )?;
     atomic_write_file(destination, &bytes)
 }
 
 fn truncate_wal(database_path: &Path) -> Result<(), WorkspaceError> {
     let mut path = database_path.as_os_str().to_os_string();
     path.push(".wal");
-    let file = File::create(PathBuf::from(path))?;
-    file.sync_all()?;
+    crate::wal::truncate(&PathBuf::from(path))?;
     Ok(())
 }
 
@@ -3619,11 +3667,9 @@ fn write_output(
         stdout.write_all(bytes)?;
         return Ok(());
     }
-    if same_path(destination, &workspace.database_path())
-        || same_path(destination, &workspace.root.join(MANIFEST_FILE))
-    {
+    if is_protected_workspace_path(workspace, destination) {
         return Err(WorkspaceError::Invalid(
-            "refusing to overwrite workspace metadata or database".to_string(),
+            "refusing to overwrite workspace metadata, locks, database, or history".to_string(),
         ));
     }
     if let Some(parent) = destination
@@ -3775,6 +3821,43 @@ fn temporary_path(destination: &Path) -> PathBuf {
     destination.with_file_name(format!(".{name}.basalt-tmp-{}-{stamp}", std::process::id()))
 }
 
+fn is_protected_workspace_path(workspace: &Workspace, destination: &Path) -> bool {
+    let database = workspace.database_path();
+    let protected = [
+        workspace.root.join(MANIFEST_FILE),
+        workspace.root.join(WORKSPACE_LOCK_FILE),
+        database.clone(),
+        sidecar_path(&database, ".wal"),
+        sidecar_path(&database, ".lock"),
+        sidecar_path(&database, ".tmp"),
+        workspace.root.join(HISTORY_DIR),
+    ];
+    protected
+        .iter()
+        .any(|path| path_is_same_or_descendant(destination, path))
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn path_is_same_or_descendant(path: &Path, protected: &Path) -> bool {
+    let normalized_destination = normalized_path(path);
+    let normalized_protected = normalized_path(protected);
+    if normalized_destination == normalized_protected
+        || normalized_destination.starts_with(&normalized_protected)
+    {
+        return true;
+    }
+    match (resolved_path(path), resolved_path(protected)) {
+        (Some(path), Some(protected)) => path == protected || path.starts_with(&protected),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
 fn same_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;

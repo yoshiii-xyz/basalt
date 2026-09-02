@@ -143,9 +143,9 @@ basalt workspace export --format sql .basalt-workspace issues issues.sql
 CSV, JSON Lines, and SQL output are deterministic for the same database state.
 CSV uses an empty field for `NULL`; JSON Lines preserves typed JSON values; SQL
 contains a portable `CREATE TABLE` and `INSERT` sequence. User-created indexes
-are not included in SQL dumps. Export refuses to overwrite the workspace
-manifest or database and uses a temporary file before installing a regular
-output file.
+are not included in SQL dumps. Export refuses to overwrite workspace metadata,
+lock/WAL sidecars, or history files and uses a temporary file before installing
+a regular output file.
 
 Automation can add `--json` to import and export commands to receive one
 machine-readable metadata object on stdout. Import reports the source, format,

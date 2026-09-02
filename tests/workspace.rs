@@ -247,7 +247,14 @@ fn refuses_export_paths_that_alias_workspace_metadata() {
         .success()
     );
 
-    for protected_file in ["data.basalt", "workspace.json"] {
+    for protected_file in [
+        "data.basalt",
+        "workspace.json",
+        ".workspace.lock",
+        "data.basalt.wal",
+        "data.basalt.lock",
+        "data.basalt.tmp",
+    ] {
         let alias = workspace.join("..").join("workspace").join(protected_file);
         let output = run(&[
             "workspace",
@@ -264,10 +271,25 @@ fn refuses_export_paths_that_alias_workspace_metadata() {
         );
         assert!(
             String::from_utf8_lossy(&output.stderr)
-                .contains("refusing to overwrite workspace metadata or database"),
+                .contains("refusing to overwrite workspace metadata, locks, database, or history"),
             "unexpected export error: {output:?}"
         );
     }
+
+    let history_output = workspace.join("history").join("changes").join("backup.csv");
+    let output = run(&[
+        "workspace",
+        "export",
+        "--format",
+        "csv",
+        path_arg(&workspace),
+        "events",
+        path_arg(&history_output),
+    ]);
+    assert!(
+        !output.status.success(),
+        "history export unexpectedly succeeded: {output:?}"
+    );
 
     assert_eq!(inspect(&workspace)["tables"][0]["rows"], 1);
 }
