@@ -206,10 +206,17 @@ The switching release must be usable without Rust:
 - a published, unambiguous package name if a Rust package is offered;
 - a one-command installer or package-manager path;
 - a copy-paste MCP configuration using the installed binary;
-- an MCP Registry entry when the registry contract is stable enough for the
-  release;
+- an MCP Registry entry after the package and binary release exist and the
+  registry contract is stable enough for the release;
 - checksums and release notes;
 - an install smoke test from a clean environment.
+
+The official registry currently documents Cargo and MCPB package types, but it
+is still in preview and stores installation metadata rather than artifacts.
+Basalt will publish registry metadata only after `basalt-db` is on crates.io
+and the checksummed binary release exists. The Cargo package will need a
+visible `mcp-name:` marker in the rendered README for registry ownership
+verification; adding that marker before publication would be misleading.
 
 ## Finite implementation plan
 
@@ -338,6 +345,8 @@ Primary and current sources reviewed for this decision:
 - [Redis Agent Filesystem](https://github.com/redis/agent-filesystem)
 - [MCP official reference servers](https://github.com/modelcontextprotocol/servers)
 - [MCP Registry](https://modelcontextprotocol.io/registry/about)
+- [MCP Registry package types](https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/package-types.mdx)
+- [MCP Registry publishing quickstart](https://modelcontextprotocol.io/registry/quickstart)
 - [MCP 2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
 - [MCP tool annotation guidance](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
 - [MCP roots and filesystem boundaries](https://modelcontextprotocol.io/specification/2025-03-26/client/roots)

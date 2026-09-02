@@ -59,6 +59,13 @@ The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles all targets on macOS and Windows runners. The release workflow's
 artifact matrix remains the source of truth for the published architectures.
 
+The MCP Registry is a separate metadata publication. Its current preview
+supports Cargo and MCPB packages but does not host the artifacts themselves;
+publish `server.json` only after the crates.io package and GitHub release are
+available. Cargo registry ownership verification also requires a visible
+`mcp-name:` marker in the rendered package README. Do not add or publish that
+marker as part of an unreleased candidate.
+
 ## Publication steps
 
 Publication is intentionally manual because it creates external releases. From
