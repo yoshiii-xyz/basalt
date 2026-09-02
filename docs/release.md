@@ -89,6 +89,14 @@ following sequence was completed for `v0.1.1`; replace `VERSION` with a new
 version for a future release. Run the dry run and publish the package first,
 then push the version tag to start the GitHub release workflow:
 
+Make the release commit's README, changelog, and packaged documentation final
+before publishing. Do not update those files after `cargo publish` to announce
+that the release exists: crates.io versions are immutable, so a post-publish
+documentation commit makes the repository's `main` branch differ from the
+documentation shipped in the tagged package. Put release-status wording in
+the release notes or use version-neutral wording that is true before and after
+publication.
+
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked

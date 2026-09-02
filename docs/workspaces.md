@@ -68,8 +68,10 @@ stored as compact text. Inputs are limited to 64 MiB and row imports are
 atomic. Every successful import also creates a recoverable history entry and
 returns a `change_id`; use `workspace history`, `workspace diff`, and
 `workspace undo` to inspect or reverse the latest import. This applies to both
-row-oriented imports and SQL dumps. A failed import leaves no partial data and
-is recorded as a failed operation for diagnostics.
+row-oriented imports and SQL dumps. Malformed input rejected during parsing
+leaves no history record; failures after the import operation begins are
+recorded as failed operations for diagnostics. In both cases, durable workspace
+data remains unchanged.
 
 Imported tables have no inferred primary keys or other constraints. Add those
 with SQL after inspecting the imported data.
