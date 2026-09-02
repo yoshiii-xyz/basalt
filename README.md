@@ -172,6 +172,10 @@ ephemeral direct-mode session. The installed binary is preferred for host
 configuration; running from a checkout is also possible with `cargo run --quiet
 -- mcp --workspace /absolute/path/to/project-data`.
 
+When an MCP host advertises form elicitation, Basalt also asks that client for
+approval immediately before each workspace import, apply, or undo. Hosts that
+do not advertise elicitation use the explicit `--allow-writes` startup policy.
+
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
 `workspace_preview`, `workspace_plan`, `workspace_apply`,
 `workspace_history`, `workspace_diff`, `workspace_undo`, and

@@ -10,8 +10,9 @@ use std::time::Instant;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
-    Implementation, ListResourcesResult, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
+    ElicitRequestParams, ElicitationAction, ElicitationSchema, Implementation, ListResourcesResult,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{
@@ -307,6 +308,14 @@ struct ChangeInput {
     /// A change identifier returned by workspace_apply or workspace_undo.
     change_id: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WriteApproval {
+    /// Set to true only when the user approves the described workspace change.
+    approved: bool,
+}
+
+rmcp::elicit_safe!(WriteApproval);
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct DiffInput {
@@ -705,7 +714,7 @@ impl BasaltMcp {
     /// Import bounded structured-data content into a workspace with recovery.
     #[tool(
         name = "workspace_import",
-        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. Content is limited to 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; use the CLI for SQL dump imports or larger imports.",
+        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. Content is limited to 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; clients advertising form elicitation are asked for approval immediately before the import. Use the CLI for SQL dump imports or larger imports.",
         annotations(
             title = "Import workspace data",
             read_only_hint = false,
@@ -717,6 +726,7 @@ impl BasaltMcp {
     async fn workspace_import(
         &self,
         Parameters(input): Parameters<WorkspaceImportInput>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<crate::workspace::ImportReport>, String> {
         if !self.allow_writes {
             return Err(
@@ -730,6 +740,16 @@ impl BasaltMcp {
                 crate::workspace::MAX_MCP_IMPORT_BYTES / (1024 * 1024)
             ));
         }
+        request_write_approval(
+            &context,
+            format!(
+                "Approve importing {} bytes of {} content into workspace table {:?}?",
+                input.content.len(),
+                input.format,
+                input.table
+            ),
+        )
+        .await?;
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -812,7 +832,7 @@ impl BasaltMcp {
     /// Apply one exact workspace plan when writes are enabled.
     #[tool(
         name = "workspace_apply",
-        description = "Apply exactly one plan returned by workspace_preview. A workspace MCP plan may affect at most 10,000 rows. Writes are disabled unless the MCP process was started with --allow-writes; stale plans are rejected and a recovery point is created first.",
+        description = "Apply exactly one plan returned by workspace_preview. A workspace MCP plan may affect at most 10,000 rows. Writes are disabled unless the MCP process was started with --allow-writes; clients advertising form elicitation are asked for approval immediately before applying. Stale plans are rejected and a recovery point is created first.",
         annotations(
             title = "Apply workspace plan",
             read_only_hint = false,
@@ -824,13 +844,22 @@ impl BasaltMcp {
     async fn workspace_apply(
         &self,
         Parameters(input): Parameters<PlanInput>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<crate::workspace::ApplyReport>, String> {
         if !self.allow_writes {
             return Err(
                 "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
-                    .to_string(),
+                .to_string(),
             );
         }
+        request_write_approval(
+            &context,
+            format!(
+                "Approve applying Basalt workspace plan {}? Review its exact SQL and impact with workspace_plan first.",
+                input.plan_id
+            ),
+        )
+        .await?;
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -907,7 +936,7 @@ impl BasaltMcp {
     /// Undo the latest committed workspace change when writes are enabled.
     #[tool(
         name = "workspace_undo",
-        description = "Undo the latest committed workspace change by restoring its verified recovery point. Writes are disabled unless --allow-writes is enabled, and later work is never discarded implicitly.",
+        description = "Undo the latest committed workspace change by restoring its verified recovery point. Writes are disabled unless --allow-writes is enabled; clients advertising form elicitation are asked for approval immediately before restoring it. Later work is never discarded implicitly.",
         annotations(
             title = "Undo workspace change",
             read_only_hint = false,
@@ -919,13 +948,22 @@ impl BasaltMcp {
     async fn workspace_undo(
         &self,
         Parameters(input): Parameters<ChangeInput>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<crate::workspace::UndoReport>, String> {
         if !self.allow_writes {
             return Err(
                 "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
-                    .to_string(),
+                .to_string(),
             );
         }
+        request_write_approval(
+            &context,
+            format!(
+                "Approve undoing the latest Basalt workspace change {}? Later work is never discarded implicitly.",
+                input.change_id
+            ),
+        )
+        .await?;
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -975,7 +1013,7 @@ impl BasaltMcp {
 impl ServerHandler for BasaltMcp {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.target.is_workspace() {
-            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, workspace_plan to reload a saved plan after a lost response or restart, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
+            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, workspace_plan to reload a saved plan after a lost response or restart, and workspace_apply only when writes are explicitly enabled. Clients advertising form elicitation receive a user approval prompt before workspace imports, applies, and undos. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
         } else if self.allow_writes {
             "Basalt direct database mode has write access because --allow-writes was explicitly provided. Use query for read-only SELECT or EXPLAIN SELECT; use execute for writes and transaction control. Results are bounded."
         } else {
@@ -1072,6 +1110,51 @@ async fn execute_sql(
     })
     .await
     .map_err(|error| format!("SQL execution task failed: {error}"))?
+}
+
+async fn request_write_approval(
+    context: &RequestContext<RoleServer>,
+    message: String,
+) -> Result<(), String> {
+    let supports_form = context
+        .client_capabilities()
+        .and_then(|capabilities| capabilities.elicitation)
+        .is_some_and(|capability| capability.form.is_some() || capability.url.is_none());
+    if !supports_form {
+        return Ok(());
+    }
+
+    let schema = ElicitationSchema::from_type::<WriteApproval>()
+        .map_err(|error| format!("could not build write approval prompt: {error}"))?;
+    let response = context
+        .peer
+        .create_elicitation_with_timeout(
+            ElicitRequestParams::FormElicitationParams {
+                meta: None,
+                message,
+                requested_schema: schema,
+            },
+            Some(std::time::Duration::from_secs(300)),
+        )
+        .await
+        .map_err(|error| format!("workspace write approval request failed: {error}"))?;
+    match response.action {
+        ElicitationAction::Accept => {
+            let content = response.content.ok_or_else(|| {
+                "workspace write approval was accepted without a response".to_string()
+            })?;
+            let approval: WriteApproval = serde_json::from_value(content)
+                .map_err(|error| format!("workspace write approval was invalid: {error}"))?;
+            if approval.approved {
+                Ok(())
+            } else {
+                Err("workspace write was not approved by the user".to_string())
+            }
+        }
+        ElicitationAction::Decline => Err("workspace write was declined by the user".to_string()),
+        ElicitationAction::Cancel => Err("workspace write approval was cancelled".to_string()),
+        _ => Err("workspace write approval returned an unknown action".to_string()),
+    }
 }
 
 async fn execute_workspace_sql(

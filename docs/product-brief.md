@@ -258,6 +258,9 @@ states that precision honestly.
 ### Safety
 
 - MCP starts read-only unless the operator explicitly enables writes.
+- When an MCP client advertises form elicitation, each workspace import, apply,
+  and undo requests a user decision immediately before changing data; older
+  clients fall back to the explicit startup write policy.
 - Write tools have separate names and accurate risk annotations.
 - Workspace paths are explicit and cannot escape the configured workspace.
 - Structured-data imports are explicit, content-based, bounded, and recoverable;
@@ -336,7 +339,8 @@ an ingestion script or knowing the internal file layout.
   read-only by default, engine-bounded, typed, and covered by stdio wire tests
   for the full ingest-to-undo journey without shelling out. Workspace MCP
   imports are limited to structured row formats, require explicit writes, and
-  create recovery points.
+  create recovery points; clients advertising form elicitation also receive a
+  per-operation approval prompt before workspace imports, applies, and undos.
 - Milestone 5 remains open only for publication and external-user validation.
   Hosted release evidence is complete: the incumbent benchmark harness,
   recorded SQLite/DuckDB snapshot, and first full comparison run are complete;

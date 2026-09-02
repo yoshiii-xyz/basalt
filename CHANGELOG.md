@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workspace MCP writes now request per-operation user approval through MCP
+  form elicitation when the connected client advertises that capability; older
+  clients retain the explicit startup write policy.
 - Workspace diffs now report exact added and removed row counts using a
   deterministic row-multiset comparison, while keeping the no-keyed-patch
   limitation explicit.

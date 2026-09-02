@@ -41,6 +41,8 @@ struct McpProcess {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     pending: HashMap<u64, Value>,
+    elicitation_requests: usize,
+    approve_elicitation: bool,
 }
 
 impl McpProcess {
@@ -62,6 +64,20 @@ impl McpProcess {
 
     fn start_with_workspace(workspace: &Path, allow_writes: bool) -> Self {
         Self::start_with_workspace_env(workspace, allow_writes, None)
+    }
+
+    fn start_with_workspace_approval(
+        workspace: &Path,
+        allow_writes: bool,
+        approve_elicitation: bool,
+    ) -> Self {
+        let workspace = workspace.to_str().expect("workspace path should be UTF-8");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_basalt"));
+        command.args(["mcp", "--workspace", workspace]);
+        if allow_writes {
+            command.arg("--allow-writes");
+        }
+        Self::spawn_with_elicitation(command, approve_elicitation)
     }
 
     fn start_with_workspace_init(workspace: &Path, allow_writes: bool) -> Self {
@@ -100,7 +116,11 @@ impl McpProcess {
         Self::spawn(command)
     }
 
-    fn spawn(mut command: Command) -> Self {
+    fn spawn(command: Command) -> Self {
+        Self::spawn_with_elicitation(command, true)
+    }
+
+    fn spawn_with_elicitation(mut command: Command, approve_elicitation: bool) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -114,6 +134,8 @@ impl McpProcess {
             input,
             output,
             pending: HashMap::new(),
+            elicitation_requests: 0,
+            approve_elicitation,
         }
     }
 
@@ -150,6 +172,22 @@ impl McpProcess {
                 "MCP server exited before responding to request {id}"
             );
             let message: Value = serde_json::from_str(&line).expect("stdout must contain JSON-RPC");
+            if message.get("method") == Some(&Value::String("elicitation/create".into())) {
+                self.elicitation_requests += 1;
+                let request_id = message
+                    .get("id")
+                    .cloned()
+                    .expect("elicitation request should have an ID");
+                self.send(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "action": "accept",
+                        "content": {"approved": self.approve_elicitation}
+                    }
+                }));
+                continue;
+            }
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 return message;
             }
@@ -376,6 +414,174 @@ fn serves_modern_discovery_requests_with_per_request_metadata() {
         "basalt://schema"
     );
     server.close();
+}
+
+#[test]
+fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let metadata = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "elicitation-integration-test",
+            "version": "1.0.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {
+            "elicitation": {}
+        }
+    });
+    let mut server = McpProcess::start_with_workspace_approval(&workspace, true, true);
+    let discovery = server.request(1, "server/discover", json!({"_meta": metadata.clone()}));
+    assert!(result(&discovery)["supportedVersions"].is_array());
+
+    let imported = server.request(
+        2,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    let import_change_id = result(&imported)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("import should return a change ID")
+        .to_owned();
+    assert_eq!(server.elicitation_requests, 1);
+
+    let preview = server.request(
+        3,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_preview",
+            "arguments": {"sql": "UPDATE users SET name = 'Grace' WHERE id = 1"}
+        }),
+    );
+    let plan_id = result(&preview)["structuredContent"]["plan_id"]
+        .as_str()
+        .expect("preview should return a plan ID")
+        .to_owned();
+
+    let applied = server.request(
+        4,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_apply",
+            "arguments": {"plan_id": plan_id.clone()}
+        }),
+    );
+    let change_id = result(&applied)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("apply should return a change ID")
+        .to_owned();
+    assert_eq!(server.elicitation_requests, 2);
+
+    let undone = server.request(
+        5,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_undo",
+            "arguments": {"change_id": change_id.clone()}
+        }),
+    );
+    assert_eq!(
+        result(&undone)["structuredContent"]["undone_change_id"],
+        change_id
+    );
+    assert_eq!(server.elicitation_requests, 3);
+    assert_ne!(import_change_id, change_id);
+    server.close();
+
+    let declined_workspace = temp.path().join("declined-workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&declined_workspace)])
+        .output()
+        .expect("declined workspace init should run");
+    assert!(
+        init.status.success(),
+        "declined workspace init failed: {init:?}"
+    );
+
+    let mut declined = McpProcess::start_with_workspace_approval(&declined_workspace, true, false);
+    let discovery = declined.request(
+        1,
+        "server/discover",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "elicitation-decline-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                }
+            }
+        }),
+    );
+    assert!(result(&discovery)["supportedVersions"].is_array());
+    let rejected = declined.request(
+        2,
+        "tools/call",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "elicitation-decline-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                }
+            },
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert_eq!(result(&rejected)["isError"], true);
+    assert_eq!(declined.elicitation_requests, 1);
+    let inspect = declined.request(
+        3,
+        "tools/call",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "elicitation-decline-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                }
+            },
+            "name": "workspace_inspect",
+            "arguments": {}
+        }),
+    );
+    assert!(
+        result(&inspect)["structuredContent"]["tables"]
+            .as_array()
+            .expect("declined import should leave workspace readable")
+            .is_empty()
+    );
+    declined.close();
 }
 
 #[test]

@@ -114,6 +114,13 @@ policy for applying plans and undoing changes:
 }
 ```
 
+When the connected client advertises MCP form elicitation, Basalt requests a
+user decision immediately before each `workspace_import`, `workspace_apply`,
+and `workspace_undo`. No workspace data is changed unless the client returns
+an explicit approval. Older clients that do not advertise elicitation retain
+the explicit `--allow-writes` startup policy; Basalt does not treat tool
+annotations as approval enforcement.
+
 Direct database mode remains available for compatibility with existing Basalt
 users. It is also read-only by default; `execute` and `checkpoint` require
 `--allow-writes`. Direct mode is not the scoped workspace workflow and exposes
@@ -209,14 +216,14 @@ Workspace mode also provides:
 
 | Tool | Use | Mutates data |
 | --- | --- | --- |
-| `workspace_import` | Import bounded CSV, JSON, or JSON Lines content into a new table and create a recovery point | Yes; requires approval |
+| `workspace_import` | Import bounded CSV, JSON, or JSON Lines content into a new table and create a recovery point | Yes; requires approval; elicitation when advertised |
 | `workspace_inspect` | Read workspace metadata, schema, and row counts | No |
 | `workspace_preview` | Execute a bounded mutation in isolation and save its exact plan | Plan metadata only |
 | `workspace_plan` | Reload one persisted plan by ID, including exact SQL and impact metadata | No |
-| `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
+| `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval; elicitation when advertised |
 | `workspace_history` | Read the change ledger and recovery statuses | Recovery metadata may be reconciled |
 | `workspace_diff` | Compare a change recovery point with current state and report schema plus exact added/removed row counts; bounded to 10,000 rows across each compared database | Recovery metadata may be reconciled |
-| `workspace_undo` | Restore the latest committed change's recovery point | Yes; requires approval |
+| `workspace_undo` | Restore the latest committed change's recovery point | Yes; requires approval; elicitation when advertised |
 | `workspace_export` | Return one table as bounded CSV, JSON Lines, or SQL content | No |
 
 `execute` is available only in direct database mode. It is absent from the
@@ -234,10 +241,14 @@ In workspace mode, use this sequence:
    and impact summary, then keep the returned `plan_id`.
 4. If the plan response was lost or the server restarted, call
    `workspace_plan` with the saved `plan_id` to reload the exact review
-   context. Have the operator approve that plan, then call `workspace_apply`.
-5. Use `workspace_history` and `workspace_diff` to inspect the committed change.
-6. Call `workspace_undo` with the latest change ID if the change should be
-   reversed.
+   context.
+5. Have the operator approve that plan, then call `workspace_apply`. When the
+   client advertises form elicitation, Basalt obtains this approval in the MCP
+   interaction immediately before applying it.
+6. Use `workspace_history` and `workspace_diff` to inspect the committed
+   change.
+7. Call `workspace_undo` with the latest change ID if the change should be
+   reversed; it uses the same approval behavior.
 
 The complete preview report is checked against the MCP response limit before
 its plan metadata is persisted. An oversized preview fails without leaving a
