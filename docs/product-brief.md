@@ -183,7 +183,7 @@ The current repository already provides useful foundations:
 
 The current product has these remaining limitations and validation gaps:
 
-- The `basalt-db` crate and the `v0.1.1` GitHub binary release are published;
+- The `basalt-db` crate and the `v0.1.2` GitHub binary release are published;
   the release workflow and isolated consumer smoke tests verify the normal-user
   paths.
 - The package name is `basalt-db` because `basalt` is already present in the
@@ -351,8 +351,9 @@ an ingestion script or knowing the internal file layout.
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests
   are implemented and verified locally; hosted CI also checks macOS and Windows
-  compilation and tests. The `basalt-db` 0.1.1 crate, GitHub release, public
-  checksums, installer, and MCP Registry entry are now published and verified.
+  compilation and tests. The `basalt-db` 0.1.2 crate, GitHub release, public
+  checksums, and installer are now published and verified. The MCP Registry
+  entry remains at 0.1.1 pending its separate metadata publication.
   No adoption claim is made until external users exercise the workflow.
 
 ### Milestone 3 — Reversible state

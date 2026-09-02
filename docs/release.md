@@ -65,16 +65,16 @@ override and archive-verification step after regenerating the generated file.
 
 The package is named `basalt-db` to avoid an existing crates.io name conflict,
 but every archive contains a `basalt` executable. The crate install is
-`cargo install basalt-db --locked`; the `v0.1.1` prebuilt download and installer
+`cargo install basalt-db --locked`; the `v0.1.2` prebuilt download and installer
 are published and have passed the public checksum and isolated consumer smoke
 checks.
 
 The [production-readiness contract](production-readiness.md) is the authority
 for technical scope, fixed limits, backup/restore, and evidence. The public
-`v0.1.1` artifacts do not automatically include hardening committed after that
-release; the current hardened candidate is `v0.1.2`. Publish a new version only
-after its package, archives, checksums,
-installer, and registry metadata are verified together.
+`v0.1.2` crate and GitHub release artifacts include the hardening described by
+that contract. The MCP Registry is a separate publication and still lists
+`v0.1.1`; update it only after its `server.json` version and corresponding
+release assets are verified together.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles and tests on macOS and Windows runners. The release workflow's
@@ -92,7 +92,7 @@ only after its corresponding crate and GitHub release are available.
 ## Publication steps for future releases
 
 Publication is intentionally manual because it creates external releases. The
-following sequence was completed for `v0.1.1`; replace `VERSION` with a new
+following sequence was completed for `v0.1.2`; replace `VERSION` with a new
 version for a future release. Run the dry run and publish the package first,
 then push the version tag to start the GitHub release workflow:
 
@@ -107,7 +107,7 @@ publication.
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-VERSION=0.1.2
+VERSION=0.1.3
 git tag -a "v${VERSION}" -m "Basalt v${VERSION}"
 git push origin "v${VERSION}"
 ```
