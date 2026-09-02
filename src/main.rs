@@ -76,15 +76,19 @@ fn run_mcp(args: &[String]) {
         return;
     }
 
-    let database = match open_database(&options.database) {
-        Ok(database) => database,
-        Err(error) => {
-            eprintln!("basalt mcp: {error}");
-            std::process::exit(1);
+    let result = if let Some(path) = options.workspace {
+        match basalt::workspace::Workspace::open(path) {
+            Ok(workspace) => basalt::mcp::run_workspace(workspace, options.allow_writes),
+            Err(error) => Err(format!("could not open workspace: {error}")),
+        }
+    } else {
+        match open_database(&options.database) {
+            Ok(database) => basalt::mcp::run_database(database, options.allow_writes),
+            Err(error) => Err(error.to_string()),
         }
     };
 
-    if let Err(error) = basalt::mcp::run(database) {
+    if let Err(error) = result {
         eprintln!("basalt mcp: {error}");
         std::process::exit(1);
     }

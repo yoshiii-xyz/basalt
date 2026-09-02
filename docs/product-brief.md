@@ -230,12 +230,15 @@ an ingestion script or knowing the internal file layout.
 - Milestone 2 is implemented and covered by CLI integration tests: versioned
   initialization, inspection, CSV/JSON/JSON Lines/SQL imports, deterministic
   exports, reopen behavior, and failed-import rollback.
-- Milestone 3 is partially implemented: exact-state preview/apply plans,
-  durable recovery points, table-level diffs, history, and latest-change-only
-  undo are available. Crash-injection coverage and the remaining failure
-  hardening are still open.
-- Milestones 4–5 remain open. The workspace-aware MCP surface, incumbent
-  benchmarks, and normal-user release artifacts are not complete yet.
+- Milestone 3 is complete: exact-state preview/apply plans, durable recovery
+  points, table-level diffs, history, latest-change-only undo, and crash
+  reconciliation are implemented and covered by failure-injection tests.
+- Milestone 4 is complete: workspace-aware MCP tools are scoped by mode,
+  read-only by default, bounded, typed, and covered by stdio wire tests for the
+  full inspect-to-undo journey.
+- Milestone 5 remains open: incumbent benchmarks, differential/fuzz coverage,
+  normal-user release artifacts, and final packaging/security checks are not
+  complete yet.
 
 ### Milestone 3 — Reversible state
 

@@ -10,6 +10,12 @@
   reopen, format round trips, and failed-import rollback.
 - Added exact-state write plans, durable recovery points, table-level diffs,
   change history, and latest-change-only undo for workspaces.
+- Added workspace-aware MCP tools for inspect, preview, apply, history, diff,
+  undo, and bounded export. MCP is read-only by default; direct SQL writes,
+  workspace applies/undos, and checkpointing require explicit `--allow-writes`.
+- Scoped MCP tool discovery by mode so direct database clients do not receive
+  workspace-only tools and workspace clients cannot bypass the plan lifecycle
+  with unrestricted SQL execution.
 - Completed the embedded SQL engine, storage, indexes, transactions, WAL
   recovery, planner, and command-line frontend.
 - Added script execution, CSV/JSON-lines output, schema discovery, crash

@@ -40,8 +40,12 @@ do not claim an audit was performed when the tool was unavailable.
    actions and through the interactive shell.
 5. Start `basalt mcp :memory:` and verify `server/discover` (or legacy
    `initialize`), `tools/list`, `tools/call`, `resources/list`, and
-   `resources/read` over newline-delimited JSON-RPC on stdout.
-6. Verify a durable MCP database survives a server restart and that all
+   `resources/read` over newline-delimited JSON-RPC on stdout. Confirm direct
+   writes are denied until `--allow-writes` is supplied.
+6. Create a workspace and verify the same MCP process can inspect, preview,
+   apply, diff, undo, and export without an arbitrary output path. Confirm
+   workspace mode does not list the unrestricted `execute` tool.
+7. Verify a durable MCP database survives a server restart and that all
    diagnostics stay off stdout.
 
 ## Release review

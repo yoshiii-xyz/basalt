@@ -120,6 +120,8 @@ output file.
 ## Current boundary
 
 The workspace foundation provides `init`, `inspect`, read-only `query`,
-`preview`, `apply`, `history`, `diff`, `undo`, `import`, and `export`.
-The reversible lifecycle is local and single-process; the workspace-aware MCP
-surface, crash-injection coverage, and release packaging remain separate work.
+`preview`, `apply`, `history`, `diff`, `undo`, `import`, and `export`. The same
+inspect-to-undo lifecycle is available through `basalt mcp --workspace PATH`;
+MCP writes require `--allow-writes` and return bounded structured results. The
+reversible lifecycle is local and single-process. See [the MCP contract](mcp.md)
+for the agent-facing sequence and approval boundary.

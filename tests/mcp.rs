@@ -1,10 +1,36 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "basalt-mcp-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&path).expect("temporary directory should be created");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 struct McpProcess {
     child: Child,
@@ -14,12 +40,42 @@ struct McpProcess {
 
 impl McpProcess {
     fn start() -> Self {
-        Self::start_with_database(":memory:")
+        Self::start_with_options(":memory:", false)
+    }
+
+    fn start_writable() -> Self {
+        Self::start_with_options(":memory:", true)
     }
 
     fn start_with_database(database: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_basalt"))
-            .args(["mcp", database])
+        Self::start_with_options(database, false)
+    }
+
+    fn start_writable_with_database(database: &str) -> Self {
+        Self::start_with_options(database, true)
+    }
+
+    fn start_with_workspace(workspace: &Path, allow_writes: bool) -> Self {
+        let workspace = workspace.to_str().expect("workspace path should be UTF-8");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_basalt"));
+        command.args(["mcp", "--workspace", workspace]);
+        if allow_writes {
+            command.arg("--allow-writes");
+        }
+        Self::spawn(command)
+    }
+
+    fn start_with_options(database: &str, allow_writes: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_basalt"));
+        command.args(["mcp", database]);
+        if allow_writes {
+            command.arg("--allow-writes");
+        }
+        Self::spawn(command)
+    }
+
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -110,7 +166,7 @@ fn initialize_legacy(server: &mut McpProcess) {
 
 #[test]
 fn serves_legacy_stdio_clients_with_tools_resources_and_stateful_transactions() {
-    let mut server = McpProcess::start();
+    let mut server = McpProcess::start_writable();
     initialize_legacy(&mut server);
 
     let tools_response = server.request(2, "tools/list", json!({}));
@@ -285,11 +341,247 @@ fn serves_modern_discovery_requests_with_per_request_metadata() {
 }
 
 #[test]
+fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("users.csv");
+    fs::write(&source, "id,name\n1,Ada\n").expect("CSV fixture should be written");
+
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+    let import = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args([
+            "workspace",
+            "import",
+            "--table",
+            "users",
+            path_arg(&workspace),
+            path_arg(&source),
+        ])
+        .output()
+        .expect("workspace import should run");
+    assert!(
+        import.status.success(),
+        "workspace import failed: {import:?}"
+    );
+
+    let mut read_only = McpProcess::start_with_workspace(&workspace, false);
+    initialize_legacy(&mut read_only);
+
+    let tools = read_only.request(2, "tools/list", json!({}));
+    let tool_names: Vec<&str> = result(&tools)["tools"]
+        .as_array()
+        .expect("workspace tools should be an array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool should have a name"))
+        .collect();
+    assert_eq!(
+        tool_names,
+        [
+            "checkpoint",
+            "describe_table",
+            "list_tables",
+            "query",
+            "workspace_apply",
+            "workspace_diff",
+            "workspace_export",
+            "workspace_history",
+            "workspace_inspect",
+            "workspace_preview",
+            "workspace_undo"
+        ]
+    );
+    assert!(!tool_names.contains(&"execute"));
+
+    let inspect = read_only.request(
+        3,
+        "tools/call",
+        json!({"name": "workspace_inspect", "arguments": {}}),
+    );
+    assert_eq!(
+        result(&inspect)["structuredContent"]["tables"][0]["name"],
+        "users"
+    );
+    assert_eq!(
+        result(&inspect)["structuredContent"]["tables"][0]["rows"],
+        1
+    );
+
+    let query = read_only.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {"sql": "SELECT name FROM users WHERE id = 1"}
+        }),
+    );
+    assert_eq!(
+        result(&query)["structuredContent"]["results"][0]["rows"][0][0],
+        json!({"type": "text", "value": "Ada"})
+    );
+
+    let preview = read_only.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "workspace_preview",
+            "arguments": {"sql": "UPDATE users SET name = 'Grace' WHERE id = 1"}
+        }),
+    );
+    let plan_id = result(&preview)["structuredContent"]["plan_id"]
+        .as_str()
+        .expect("preview should return a plan ID")
+        .to_owned();
+    assert_eq!(
+        result(&preview)["structuredContent"]["mutating_statements"],
+        1
+    );
+
+    let denied = read_only.request(
+        6,
+        "tools/call",
+        json!({
+            "name": "workspace_apply",
+            "arguments": {"plan_id": plan_id}
+        }),
+    );
+    assert_eq!(result(&denied)["isError"], true);
+    assert!(
+        result(&denied)["content"][0]["text"]
+            .as_str()
+            .expect("denial should include text")
+            .contains("writes are disabled")
+    );
+
+    let exported = read_only.request(
+        7,
+        "tools/call",
+        json!({
+            "name": "workspace_export",
+            "arguments": {"table": "users", "format": "csv"}
+        }),
+    );
+    assert_eq!(
+        result(&exported)["structuredContent"]["content"],
+        "id,name\n1,Ada\n"
+    );
+    read_only.close();
+
+    let mut writable = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut writable);
+    let apply = writable.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_apply",
+            "arguments": {"plan_id": plan_id}
+        }),
+    );
+    let change_id = result(&apply)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("apply should return a change ID")
+        .to_owned();
+
+    let changed = writable.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {"sql": "SELECT name FROM users"}
+        }),
+    );
+    assert_eq!(
+        result(&changed)["structuredContent"]["results"][0]["rows"][0][0],
+        json!({"type": "text", "value": "Grace"})
+    );
+
+    let history = writable.request(
+        4,
+        "tools/call",
+        json!({"name": "workspace_history", "arguments": {}}),
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][0]["change_id"],
+        change_id
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][0]["status"],
+        "committed"
+    );
+
+    let diff = writable.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "workspace_diff",
+            "arguments": {"change_id": change_id}
+        }),
+    );
+    assert_eq!(
+        result(&diff)["structuredContent"]["precision"],
+        "table-level logical comparison"
+    );
+    assert_eq!(result(&diff)["structuredContent"]["state_changed"], true);
+
+    let undo = writable.request(
+        6,
+        "tools/call",
+        json!({
+            "name": "workspace_undo",
+            "arguments": {"change_id": change_id}
+        }),
+    );
+    assert_eq!(
+        result(&undo)["structuredContent"]["undone_change_id"],
+        change_id
+    );
+
+    let restored = writable.request(
+        7,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {"sql": "SELECT name FROM users"}
+        }),
+    );
+    assert_eq!(
+        result(&restored)["structuredContent"]["results"][0]["rows"][0][0],
+        json!({"type": "text", "value": "Ada"})
+    );
+    writable.close();
+}
+
+#[test]
+fn direct_mcp_writes_require_explicit_approval() {
+    let mut server = McpProcess::start();
+    initialize_legacy(&mut server);
+    let denied = server.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "execute",
+            "arguments": {"sql": "CREATE TABLE denied (id INTEGER)"}
+        }),
+    );
+    assert_eq!(result(&denied)["isError"], true);
+    assert!(
+        result(&denied)["content"][0]["text"]
+            .as_str()
+            .expect("denial should include text")
+            .contains("--allow-writes")
+    );
+    server.close();
+}
+
+#[test]
 fn durable_database_survives_mcp_restart() {
     let path = unique_database_path();
     let path_string = path.to_str().expect("temporary path should be UTF-8");
 
-    let mut server = McpProcess::start_with_database(path_string);
+    let mut server = McpProcess::start_writable_with_database(path_string);
     initialize_legacy(&mut server);
     let setup = server.request(
         2,
@@ -330,7 +622,7 @@ fn durable_database_survives_mcp_restart() {
 
 #[test]
 fn tool_errors_are_recoverable_json_results() {
-    let mut server = McpProcess::start();
+    let mut server = McpProcess::start_writable();
     initialize_legacy(&mut server);
 
     let missing_table = server.request(
@@ -380,4 +672,15 @@ fn remove_database_files(path: &Path) {
     let _ = fs::remove_file(path);
     let wal_path = format!("{}.wal", path.display());
     let _ = fs::remove_file(wal_path);
+}
+
+fn path_arg(path: &Path) -> &str {
+    path.to_str().expect("test paths should be UTF-8")
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_nanos()
 }

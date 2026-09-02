@@ -29,6 +29,7 @@ use crate::types::{ColumnType, Value};
 pub const HELP: &str = "Basalt MCP server\n\n\
 Usage:\n  basalt mcp [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Options:\n  -d, --database PATH  Database path (default: :memory:)\n  -h, --help           Print this help\n\n\
+Workspace mode:\n  --workspace PATH     Open a Basalt workspace (read-only by default)\n  --allow-writes       Enable workspace apply/undo and direct SQL writes\n\n\
 The server speaks MCP over stdin/stdout. Diagnostics go to stderr.\n";
 
 const DEFAULT_MAX_ROWS: usize = 100;
@@ -42,6 +43,8 @@ const SCHEMA_URI: &str = "basalt://schema";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpOptions {
     pub database: String,
+    pub workspace: Option<String>,
+    pub allow_writes: bool,
     pub help: bool,
 }
 
@@ -49,6 +52,8 @@ impl Default for McpOptions {
     fn default() -> Self {
         Self {
             database: ":memory:".into(),
+            workspace: None,
+            allow_writes: false,
             help: false,
         }
     }
@@ -58,6 +63,8 @@ impl Default for McpOptions {
 pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
     let mut options = McpOptions::default();
     let mut database = None;
+    let mut workspace = None;
+    let mut allow_writes = false;
     let mut positional_only = false;
     let mut index = 0;
 
@@ -85,11 +92,30 @@ pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
                     index += 1;
                     continue;
                 }
+                "--workspace" => {
+                    index += 1;
+                    let value = args.get(index).ok_or_else(|| {
+                        McpCliError::new(format!("{argument} requires a value; try --help"))
+                    })?;
+                    set_workspace(&mut workspace, value)?;
+                    index += 1;
+                    continue;
+                }
+                "--allow-writes" | "--write" => {
+                    allow_writes = true;
+                    index += 1;
+                    continue;
+                }
                 _ => {}
             }
 
             if let Some(value) = argument.strip_prefix("--database=") {
                 set_database(&mut database, value)?;
+                index += 1;
+                continue;
+            }
+            if let Some(value) = argument.strip_prefix("--workspace=") {
+                set_workspace(&mut workspace, value)?;
                 index += 1;
                 continue;
             }
@@ -104,9 +130,16 @@ pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
         index += 1;
     }
 
+    if workspace.is_some() && database.is_some() {
+        return Err(McpCliError::new(
+            "choose --workspace or --database, not both",
+        ));
+    }
     if let Some(database) = database {
         options.database = database;
     }
+    options.workspace = workspace;
+    options.allow_writes = allow_writes;
     Ok(options)
 }
 
@@ -120,6 +153,19 @@ fn set_database(database: &mut Option<String>, value: &str) -> Result<(), McpCli
         ));
     }
     *database = Some(value.into());
+    Ok(())
+}
+
+fn set_workspace(workspace: &mut Option<String>, value: &str) -> Result<(), McpCliError> {
+    if value.is_empty() {
+        return Err(McpCliError::new("workspace path cannot be empty"));
+    }
+    if workspace.is_some() {
+        return Err(McpCliError::new(
+            "workspace path provided more than once; choose one path",
+        ));
+    }
+    *workspace = Some(value.into());
     Ok(())
 }
 
@@ -144,8 +190,45 @@ impl fmt::Display for McpCliError {
 
 impl std::error::Error for McpCliError {}
 
-/// Start the stdio MCP server for an already-open database.
+#[derive(Clone)]
+enum McpTarget {
+    Database(Database),
+    Workspace(crate::workspace::Workspace),
+}
+
+impl McpTarget {
+    fn workspace(&self) -> Result<crate::workspace::Workspace, String> {
+        match self {
+            McpTarget::Workspace(workspace) => Ok(workspace.clone()),
+            McpTarget::Database(_) => Err(
+                "this tool requires `basalt mcp --workspace PATH`; direct database mode has no workspace lifecycle"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn is_workspace(&self) -> bool {
+        matches!(self, McpTarget::Workspace(_))
+    }
+}
+
+/// Start the stdio MCP server for a direct database in read-only mode.
 pub fn run(database: Database) -> Result<(), String> {
+    run_database(database, false)
+}
+
+pub fn run_database(database: Database, allow_writes: bool) -> Result<(), String> {
+    run_target(McpTarget::Database(database), allow_writes)
+}
+
+pub fn run_workspace(
+    workspace: crate::workspace::Workspace,
+    allow_writes: bool,
+) -> Result<(), String> {
+    run_target(McpTarget::Workspace(workspace), allow_writes)
+}
+
+fn run_target(target: McpTarget, allow_writes: bool) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()
@@ -153,7 +236,7 @@ pub fn run(database: Database) -> Result<(), String> {
         .map_err(|error| format!("could not start async runtime: {error}"))?;
 
     runtime.block_on(async move {
-        let server = BasaltMcp::new(database);
+        let server = BasaltMcp::new(target, allow_writes);
         let service = server
             .serve(rmcp::transport::stdio())
             .await
@@ -179,6 +262,39 @@ struct SqlInput {
 struct TableInput {
     /// Table name, matched case-insensitively.
     table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct WorkspaceSqlInput {
+    /// A write statement or statement sequence to preview.
+    sql: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct PlanInput {
+    /// The exact plan identifier returned by workspace_preview.
+    plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct ChangeInput {
+    /// A change identifier returned by workspace_apply or workspace_undo.
+    change_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct DiffInput {
+    /// Optional change identifier; defaults to the latest committed change.
+    #[serde(default)]
+    change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct ExportInput {
+    /// Table name, matched case-insensitively.
+    table: String,
+    /// `csv`, `jsonl`, or `sql`.
+    format: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -277,18 +393,40 @@ struct CheckpointResult {
 
 #[derive(Clone)]
 struct BasaltMcp {
-    database: Database,
+    target: McpTarget,
     connection: Arc<Mutex<Connection>>,
+    allow_writes: bool,
     tool_router: ToolRouter<Self>,
 }
 
 impl BasaltMcp {
-    fn new(database: Database) -> Self {
-        let connection = database.connect();
+    fn new(target: McpTarget, allow_writes: bool) -> Self {
+        let connection_database = match &target {
+            McpTarget::Database(database) => database.clone(),
+            McpTarget::Workspace(_) => Database::in_memory(),
+        };
+        let connection = connection_database.connect();
+        let mut tool_router = Self::tool_router();
+        if target.is_workspace() {
+            tool_router.remove_route("execute");
+        } else {
+            for tool in [
+                "workspace_apply",
+                "workspace_diff",
+                "workspace_export",
+                "workspace_history",
+                "workspace_inspect",
+                "workspace_preview",
+                "workspace_undo",
+            ] {
+                tool_router.remove_route(tool);
+            }
+        }
         Self {
-            database,
+            target,
             connection: Arc::new(Mutex::new(connection)),
-            tool_router: Self::tool_router(),
+            allow_writes,
+            tool_router,
         }
     }
 }
@@ -311,15 +449,21 @@ impl BasaltMcp {
         &self,
         Parameters(input): Parameters<SqlInput>,
     ) -> Result<Json<SqlResult>, String> {
-        execute_sql(self.connection.clone(), input, true)
-            .await
-            .map(Json)
+        if self.target.is_workspace() {
+            execute_workspace_sql(self.target.workspace()?, input, true)
+                .await
+                .map(Json)
+        } else {
+            execute_sql(self.connection.clone(), input, true)
+                .await
+                .map(Json)
+        }
     }
 
     /// Execute arbitrary SQL on the session connection.
     #[tool(
         name = "execute",
-        description = "Execute SQL against the configured Basalt database. Use for INSERT, UPDATE, DELETE, CREATE/DROP, transactions, CHECKPOINT, and SELECT when needed. Statements run in order on one connection; use BEGIN and COMMIT for an explicit multi-call transaction. This tool can change or delete data.",
+        description = "Execute SQL against a configured direct Basalt database. This tool is unavailable in workspace mode. Use for INSERT, UPDATE, DELETE, CREATE/DROP, transactions, CHECKPOINT, and SELECT when needed. Statements run in order on one connection; use BEGIN and COMMIT for an explicit multi-call transaction. This tool can change or delete data.",
         annotations(
             title = "Execute SQL",
             read_only_hint = false,
@@ -332,6 +476,18 @@ impl BasaltMcp {
         &self,
         Parameters(input): Parameters<SqlInput>,
     ) -> Result<Json<SqlResult>, String> {
+        if self.target.is_workspace() {
+            return Err(
+                "direct SQL writes are disabled in workspace mode; use workspace_preview followed by workspace_apply"
+                    .to_string(),
+            );
+        }
+        if !self.allow_writes {
+            return Err(
+                "direct SQL writes are disabled; restart with --allow-writes after explicit operator approval"
+                    .to_string(),
+            );
+        }
         execute_sql(self.connection.clone(), input, false)
             .await
             .map(Json)
@@ -351,15 +507,25 @@ impl BasaltMcp {
     )]
     async fn list_tables(&self) -> Result<Json<ListTablesResult>, String> {
         let connection = self.connection.clone();
-        let database = self.database.clone();
-        tokio::task::spawn_blocking(move || with_connection(&connection, |_| table_info(&database)))
-            .await
-            .map_err(|error| format!("table listing task failed: {error}"))?
-            .and_then(|response| {
-                ensure_output_size(&response, "table metadata")?;
-                Ok(response)
-            })
-            .map(Json)
+        let target = self.target.clone();
+        tokio::task::spawn_blocking(move || match target {
+            McpTarget::Database(database) => {
+                with_connection(&connection, |_| table_info(&database))
+            }
+            McpTarget::Workspace(workspace) => {
+                let database = workspace
+                    .database()
+                    .map_err(|error| format!("could not open workspace database: {error}"))?;
+                table_info(&database)
+            }
+        })
+        .await
+        .map_err(|error| format!("table listing task failed: {error}"))?
+        .and_then(|response| {
+            ensure_output_size(&response, "table metadata")?;
+            Ok(response)
+        })
+        .map(Json)
     }
 
     /// Describe one table.
@@ -379,9 +545,9 @@ impl BasaltMcp {
         Parameters(input): Parameters<TableInput>,
     ) -> Result<Json<TableInfo>, String> {
         let connection = self.connection.clone();
-        let database = self.database.clone();
+        let target = self.target.clone();
         tokio::task::spawn_blocking(move || {
-            with_connection(&connection, |_| {
+            let operation = |database: &Database| {
                 let name = database
                     .table_names()
                     .map_err(|error| format!("could not describe table: {error}"))?
@@ -399,7 +565,18 @@ impl BasaltMcp {
                 };
                 ensure_output_size(&response, "table metadata")?;
                 Ok(response)
-            })
+            };
+            match target {
+                McpTarget::Database(database) => {
+                    with_connection(&connection, |_| operation(&database))
+                }
+                McpTarget::Workspace(workspace) => {
+                    let database = workspace
+                        .database()
+                        .map_err(|error| format!("could not open workspace database: {error}"))?;
+                    operation(&database)
+                }
+            }
         })
         .await
         .map_err(|error| format!("table description task failed: {error}"))?
@@ -419,9 +596,16 @@ impl BasaltMcp {
         )
     )]
     async fn checkpoint(&self) -> Result<Json<CheckpointResult>, String> {
+        if !self.allow_writes {
+            return Err(
+                "checkpoint changes durable files; restart with --allow-writes after explicit operator approval"
+                    .to_string(),
+            );
+        }
         let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || {
-            with_connection(&connection, |connection| {
+        let target = self.target.clone();
+        tokio::task::spawn_blocking(move || match target {
+            McpTarget::Database(_) => with_connection(&connection, |connection| {
                 connection
                     .execute_sql("CHECKPOINT")
                     .map_err(|error| format!("checkpoint failed: {error}"))?;
@@ -430,17 +614,232 @@ impl BasaltMcp {
                 };
                 ensure_output_size(&response, "checkpoint result")?;
                 Ok(response)
-            })
+            }),
+            McpTarget::Workspace(workspace) => {
+                let database = workspace
+                    .database()
+                    .map_err(|error| format!("could not open workspace database: {error}"))?;
+                database
+                    .checkpoint()
+                    .map_err(|error| format!("checkpoint failed: {error}"))?;
+                let response = CheckpointResult {
+                    generation: database.generation(),
+                };
+                ensure_output_size(&response, "checkpoint result")?;
+                Ok(response)
+            }
         })
         .await
         .map_err(|error| format!("checkpoint task failed: {error}"))?
         .map(Json)
+    }
+
+    /// Inspect the configured workspace without returning table rows.
+    #[tool(
+        name = "workspace_inspect",
+        description = "Inspect the configured Basalt workspace, including its format version, tables, columns, and row counts. This tool is available only in --workspace mode.",
+        annotations(
+            title = "Inspect Basalt workspace",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_inspect(&self) -> Result<Json<crate::workspace::InspectReport>, String> {
+        let workspace = self.target.workspace()?;
+        let response =
+            tokio::task::spawn_blocking(move || crate::workspace::mcp_inspect(&workspace))
+                .await
+                .map_err(|error| format!("workspace inspection task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace inspection")?;
+        Ok(Json(response))
+    }
+
+    /// Preview a workspace mutation and persist its exact plan.
+    #[tool(
+        name = "workspace_preview",
+        description = "Preview a mutating SQL sequence in an isolated transaction and return an exact plan ID. The workspace data is not changed; apply the returned plan explicitly.",
+        annotations(
+            title = "Preview workspace write",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_preview(
+        &self,
+        Parameters(input): Parameters<WorkspaceSqlInput>,
+    ) -> Result<Json<crate::workspace::PlanReport>, String> {
+        let workspace = self.target.workspace()?;
+        let response = tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_preview(&workspace, &input.sql)
+        })
+        .await
+        .map_err(|error| format!("workspace preview task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace preview")?;
+        Ok(Json(response))
+    }
+
+    /// Apply one exact workspace plan when writes are enabled.
+    #[tool(
+        name = "workspace_apply",
+        description = "Apply exactly one plan returned by workspace_preview. Writes are disabled unless the MCP process was started with --allow-writes; stale plans are rejected and a recovery point is created first.",
+        annotations(
+            title = "Apply workspace plan",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_apply(
+        &self,
+        Parameters(input): Parameters<PlanInput>,
+    ) -> Result<Json<crate::workspace::ApplyReport>, String> {
+        if !self.allow_writes {
+            return Err(
+                "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
+                    .to_string(),
+            );
+        }
+        let workspace = self.target.workspace()?;
+        let response = tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_apply(&workspace, &input.plan_id)
+        })
+        .await
+        .map_err(|error| format!("workspace apply task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace apply")?;
+        Ok(Json(response))
+    }
+
+    /// Return the workspace change ledger.
+    #[tool(
+        name = "workspace_history",
+        description = "List workspace apply and undo records, including recovery status. This tool is available only in --workspace mode.",
+        annotations(
+            title = "Read workspace history",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_history(&self) -> Result<Json<Vec<crate::workspace::HistoryEntry>>, String> {
+        let workspace = self.target.workspace()?;
+        let response =
+            tokio::task::spawn_blocking(move || crate::workspace::mcp_history(&workspace))
+                .await
+                .map_err(|error| format!("workspace history task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace history")?;
+        Ok(Json(response))
+    }
+
+    /// Compare a committed change recovery point with current workspace state.
+    #[tool(
+        name = "workspace_diff",
+        description = "Compare a committed workspace change recovery point with the current state at table level. The result does not claim row-by-row patch precision.",
+        annotations(
+            title = "Diff workspace change",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_diff(
+        &self,
+        Parameters(input): Parameters<DiffInput>,
+    ) -> Result<Json<crate::workspace::DiffReport>, String> {
+        let workspace = self.target.workspace()?;
+        tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_diff(&workspace, input.change_id.as_deref())
+        })
+        .await
+        .map_err(|error| format!("workspace diff task failed: {error}"))?
+        .map_err(|error| error.to_string())
+        .and_then(|response| {
+            ensure_output_size(&response, "workspace diff")?;
+            Ok(Json(response))
+        })
+    }
+
+    /// Undo the latest committed workspace change when writes are enabled.
+    #[tool(
+        name = "workspace_undo",
+        description = "Undo the latest committed workspace change by restoring its verified recovery point. Writes are disabled unless --allow-writes is enabled, and later work is never discarded implicitly.",
+        annotations(
+            title = "Undo workspace change",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_undo(
+        &self,
+        Parameters(input): Parameters<ChangeInput>,
+    ) -> Result<Json<crate::workspace::UndoReport>, String> {
+        if !self.allow_writes {
+            return Err(
+                "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
+                    .to_string(),
+            );
+        }
+        let workspace = self.target.workspace()?;
+        let response = tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_undo(&workspace, &input.change_id)
+        })
+        .await
+        .map_err(|error| format!("workspace undo task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace undo")?;
+        Ok(Json(response))
+    }
+
+    /// Export one workspace table as bounded UTF-8 content.
+    #[tool(
+        name = "workspace_export",
+        description = "Export one workspace table as bounded CSV, JSON Lines, or SQL content. The tool returns content instead of accepting an arbitrary filesystem path.",
+        annotations(
+            title = "Export workspace table",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_export(
+        &self,
+        Parameters(input): Parameters<ExportInput>,
+    ) -> Result<Json<crate::workspace::ExportReport>, String> {
+        let workspace = self.target.workspace()?;
+        let response = tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_export(&workspace, &input.table, &input.format)
+        })
+        .await
+        .map_err(|error| format!("workspace export task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace export")?;
+        Ok(Json(response))
     }
 }
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for BasaltMcp {
     fn get_info(&self) -> ServerInfo {
+        let instructions = if self.target.is_workspace() {
+            "Basalt workspace mode is local and read-only by default. Use query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
+        } else if self.allow_writes {
+            "Basalt direct database mode has write access because --allow-writes was explicitly provided. Use query for read-only SELECT or EXPLAIN SELECT; use execute for writes and transaction control. Results are bounded."
+        } else {
+            "Basalt direct database mode is read-only. Use query for SELECT or EXPLAIN SELECT. Restart with --allow-writes only after explicit operator approval for direct SQL writes. Results are bounded."
+        };
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
@@ -448,9 +847,7 @@ impl ServerHandler for BasaltMcp {
                 .build(),
         )
         .with_server_info(Implementation::new("basalt", env!("CARGO_PKG_VERSION")))
-        .with_instructions(
-            "Basalt is a local embedded SQL database. Use query for read-only SELECT or EXPLAIN SELECT. Use execute for writes and transaction control. Results are bounded; narrow SELECT projections or lower max_rows when needed.",
-        )
+        .with_instructions(instructions)
     }
 
     async fn list_resources(
@@ -478,9 +875,24 @@ impl ServerHandler for BasaltMcp {
             ));
         }
 
-        let schema = with_connection(&self.connection, |_| schema_json(&self.database)).map_err(
-            |error| ErrorData::internal_error(format!("could not read schema: {error}"), None),
-        )?;
+        let target = self.target.clone();
+        let schema = match target {
+            McpTarget::Database(database) => {
+                with_connection(&self.connection, |_| schema_json(&database))
+            }
+            McpTarget::Workspace(workspace) => {
+                let database = workspace.database().map_err(|error| {
+                    ErrorData::internal_error(
+                        format!("could not open workspace database: {error}"),
+                        None,
+                    )
+                })?;
+                schema_json(&database)
+            }
+        }
+        .map_err(|error| {
+            ErrorData::internal_error(format!("could not read schema: {error}"), None)
+        })?;
 
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(schema, SCHEMA_URI).with_mime_type("application/json"),
@@ -517,6 +929,36 @@ async fn execute_sql(
     })
     .await
     .map_err(|error| format!("SQL execution task failed: {error}"))?
+}
+
+async fn execute_workspace_sql(
+    workspace: crate::workspace::Workspace,
+    input: SqlInput,
+    read_only: bool,
+) -> Result<SqlResult, String> {
+    let max_rows = row_limit(input.max_rows)?;
+    validate_sql(&input.sql, read_only)?;
+    tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let database = workspace
+            .database()
+            .map_err(|error| format!("workspace database open failed: {error}"))?;
+        let results = database
+            .execute_sql(&input.sql)
+            .map_err(|error| format!("SQL execution failed: {error}"))?;
+        let (results, rows_truncated) = convert_results(results, max_rows);
+        let response = SqlResult {
+            results,
+            generation: database.generation(),
+            transaction_open: false,
+            duration_ms: started.elapsed().as_millis() as u64,
+            rows_truncated,
+        };
+        ensure_output_size(&response, "SQL result")?;
+        Ok(response)
+    })
+    .await
+    .map_err(|error| format!("workspace SQL task failed: {error}"))?
 }
 
 fn validate_sql(sql: &str, read_only: bool) -> Result<(), String> {
@@ -710,7 +1152,10 @@ mod tests {
 
     #[test]
     fn mcp_defaults_to_in_memory() {
-        assert_eq!(parse_args(&[]).unwrap().database, ":memory:");
+        let options = parse_args(&[]).unwrap();
+        assert_eq!(options.database, ":memory:");
+        assert_eq!(options.workspace, None);
+        assert!(!options.allow_writes);
     }
 
     #[test]
@@ -725,6 +1170,31 @@ mod tests {
                 .database,
             "data.basalt"
         );
+    }
+
+    #[test]
+    fn mcp_accepts_workspace_and_explicit_write_policy() {
+        let options = parse_args(&args(&[
+            "--workspace",
+            ".basalt-workspace",
+            "--allow-writes",
+        ]))
+        .unwrap();
+        assert_eq!(options.workspace.as_deref(), Some(".basalt-workspace"));
+        assert!(options.allow_writes);
+        assert_eq!(options.database, ":memory:");
+    }
+
+    #[test]
+    fn mcp_rejects_mixing_workspace_and_database() {
+        let error = parse_args(&args(&[
+            "--workspace",
+            ".basalt-workspace",
+            "--database",
+            "app.basalt",
+        ]))
+        .unwrap_err();
+        assert!(error.to_string().contains("workspace or --database"));
     }
 
     #[test]

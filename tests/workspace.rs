@@ -478,6 +478,27 @@ fn interrupted_apply_and_undo_are_reconciled_after_restart() {
     assert_eq!(query["rows"][0][0], "Ada");
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_history_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    assert!(run(&["init", path_arg(&workspace)]).status.success());
+    symlink(&outside, workspace.join("history")).unwrap();
+
+    let output = run(&["workspace", "history", path_arg(&workspace)]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("symbolic link"),
+        "unexpected error: {output:?}"
+    );
+    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+}
+
 fn unique_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

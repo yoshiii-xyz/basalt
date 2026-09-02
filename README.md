@@ -102,28 +102,35 @@ server over stdio. Install the binary from this checkout:
 cargo install --path . --locked
 ```
 
-Then configure an MCP host with an absolute database path:
+Then configure an MCP host with an absolute workspace path. Workspace mode is
+the recommended agent integration: it scopes data access and requires an
+explicit preview/apply lifecycle for writes.
 
 ```json
 {
   "mcpServers": {
     "basalt": {
       "command": "basalt",
-      "args": ["mcp", "/absolute/path/to/app.basalt"]
+      "args": ["mcp", "--workspace", "/absolute/path/to/project-data"]
     }
   }
 }
 ```
 
-Use `"args": ["mcp", ":memory:"]` for an ephemeral session. The installed
-binary is preferred for host configuration; running from a checkout is also
-possible with `cargo run --quiet -- mcp /absolute/path/to/app.basalt`.
+Add `"--allow-writes"` only when the host has an explicit operator approval
+policy for applying workspace plans and undoing changes. Direct database mode
+is still available with `"args": ["mcp", "/absolute/path/to/app.basalt"]`, but
+it is read-only by default; `execute` and `checkpoint` require the same flag.
+Use `"args": ["mcp", ":memory:"]` for an ephemeral direct-mode session. The
+installed binary is preferred for host configuration; running from a checkout
+is also possible with `cargo run --quiet -- mcp --workspace /absolute/path/to/project-data`.
 
-The server exposes `query` for `SELECT` and `EXPLAIN SELECT`, `execute` for
-writes and transaction control, `list_tables`, `describe_table`, and
-`checkpoint`. It also exposes the current schema at `basalt://schema`. Query
-responses are structured and bounded; see [docs/mcp.md](docs/mcp.md) for the
-tool contract, configuration details, and troubleshooting.
+Workspace mode exposes `workspace_inspect`, `workspace_preview`,
+`workspace_apply`, `workspace_history`, `workspace_diff`, `workspace_undo`, and
+`workspace_export`, alongside bounded `query`, `list_tables`, and
+`describe_table` tools. It also exposes the current schema at
+`basalt://schema`. See [docs/mcp.md](docs/mcp.md) for the complete tool
+contract, configuration details, approval boundary, and troubleshooting.
 
 ## CLI
 

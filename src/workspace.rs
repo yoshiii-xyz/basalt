@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use csv::{ReaderBuilder, StringRecord, Writer};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
@@ -129,6 +130,11 @@ impl Workspace {
                 "workspace path cannot be empty".to_string(),
             ));
         }
+        if path_is_symlink(&root)? {
+            return Err(WorkspaceError::Invalid(
+                "workspace path cannot be a symbolic link".to_string(),
+            ));
+        }
         if root.exists() && !root.is_dir() {
             return Err(WorkspaceError::Invalid(format!(
                 "workspace path is not a directory: {}",
@@ -166,6 +172,11 @@ impl Workspace {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Workspace, WorkspaceError> {
         let root = path.as_ref().to_path_buf();
+        if path_is_symlink(&root)? {
+            return Err(WorkspaceError::Invalid(
+                "workspace path cannot be a symbolic link".to_string(),
+            ));
+        }
         if !root.is_dir() {
             return Err(WorkspaceError::Invalid(format!(
                 "workspace directory does not exist: {}",
@@ -206,11 +217,7 @@ impl Workspace {
                 manifest.database
             )));
         }
-        if path_is_symlink(&root.join(DATABASE_FILE))? {
-            return Err(WorkspaceError::Invalid(
-                "workspace database cannot be a symbolic link".to_string(),
-            ));
-        }
+        validate_database_paths(&root)?;
         Ok(Workspace { root, manifest })
     }
 
@@ -228,11 +235,7 @@ impl Workspace {
 
     pub fn database(&self) -> Result<Database, WorkspaceError> {
         let path = self.database_path();
-        if path_is_symlink(&path)? {
-            return Err(WorkspaceError::Invalid(
-                "workspace database cannot be a symbolic link".to_string(),
-            ));
-        }
+        validate_database_paths(&self.root)?;
         Ok(Database::open(path)?)
     }
 }
@@ -1095,7 +1098,7 @@ fn is_read_only(statement: &Statement) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 enum ChangeKind {
     #[serde(rename = "apply")]
     Apply,
@@ -1103,7 +1106,7 @@ enum ChangeKind {
     Undo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 enum ChangeStatus {
     #[serde(rename = "prepared")]
     Prepared,
@@ -1123,7 +1126,7 @@ impl ChangeStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 struct PreviewItem {
     statement: usize,
     kind: String,
@@ -1143,8 +1146,8 @@ struct PlanRecord {
     statements: Vec<PreviewItem>,
 }
 
-#[derive(Debug, Serialize)]
-struct PlanReport {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct PlanReport {
     plan_id: String,
     base_generation: u64,
     base_state: String,
@@ -1185,8 +1188,8 @@ struct ChangeRecord {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ApplyReport {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ApplyReport {
     change_id: String,
     plan_id: String,
     base_state: String,
@@ -1194,8 +1197,8 @@ struct ApplyReport {
     generation: u64,
 }
 
-#[derive(Debug, Serialize)]
-struct HistoryEntry {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct HistoryEntry {
     sequence: u64,
     change_id: String,
     kind: ChangeKind,
@@ -1208,8 +1211,8 @@ struct HistoryEntry {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct DiffReport {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct DiffReport {
     change_id: String,
     kind: ChangeKind,
     precision: &'static str,
@@ -1219,7 +1222,7 @@ struct DiffReport {
     tables: Vec<TableDiff>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct TableDiff {
     table: String,
     before_rows: Option<usize>,
@@ -1228,8 +1231,8 @@ struct TableDiff {
     data_changed: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct UndoReport {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct UndoReport {
     change_id: String,
     undone_change_id: String,
     restored_state: String,
@@ -1374,9 +1377,40 @@ fn is_mutation_statement(statement: &Statement) -> bool {
 }
 
 fn ensure_history_dirs(workspace: &Workspace) -> Result<(), WorkspaceError> {
-    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(PLANS_DIR))?;
-    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(CHANGES_DIR))?;
-    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(SNAPSHOTS_DIR))?;
+    let directories = history_directories(workspace);
+    validate_history_dirs(workspace)?;
+    for directory in directories {
+        fs::create_dir_all(directory)?;
+    }
+    validate_history_dirs(workspace)?;
+    Ok(())
+}
+
+fn history_directories(workspace: &Workspace) -> [PathBuf; 4] {
+    let history = workspace.root.join(HISTORY_DIR);
+    [
+        history.clone(),
+        history.join(PLANS_DIR),
+        history.join(CHANGES_DIR),
+        history.join(SNAPSHOTS_DIR),
+    ]
+}
+
+fn validate_history_dirs(workspace: &Workspace) -> Result<(), WorkspaceError> {
+    for directory in history_directories(workspace) {
+        if path_is_symlink(&directory)? {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace history directory cannot be a symbolic link: {}",
+                directory.display()
+            )));
+        }
+        if directory.exists() && !directory.is_dir() {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace history path is not a directory: {}",
+                directory.display()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1414,6 +1448,12 @@ fn snapshot_path(workspace: &Workspace, snapshot_id: &str) -> PathBuf {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkspaceError> {
+    if path_is_symlink(path)? {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace metadata file cannot be a symbolic link: {}",
+            path.display()
+        )));
+    }
     let bytes = fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
@@ -1431,6 +1471,12 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Workspa
 }
 
 fn state_fingerprint(path: &Path) -> Result<String, WorkspaceError> {
+    if path_is_symlink(path)? {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace state file cannot be a symbolic link: {}",
+            path.display()
+        )));
+    }
     Ok(format!("sha256:{}", sha256_bytes(&fs::read(path)?)))
 }
 
@@ -1489,6 +1535,11 @@ fn next_sequence(changes: &[ChangeRecord]) -> Result<u64, WorkspaceError> {
 }
 
 fn copy_atomic(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+    if path_is_symlink(source)? || path_is_symlink(destination)? {
+        return Err(WorkspaceError::Invalid(
+            "workspace recovery files cannot be symbolic links".to_string(),
+        ));
+    }
     let bytes = fs::read(source)?;
     atomic_write_file(destination, &bytes)
 }
@@ -1503,6 +1554,7 @@ fn truncate_wal(database_path: &Path) -> Result<(), WorkspaceError> {
 
 fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, WorkspaceError> {
     valid_id(plan_id)?;
+    validate_history_dirs(workspace)?;
     let path = plan_path(workspace, plan_id);
     if !path.is_file() {
         return Err(WorkspaceError::Invalid(format!(
@@ -1522,6 +1574,7 @@ fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, Workspa
 }
 
 fn load_changes(workspace: &Workspace) -> Result<Vec<ChangeRecord>, WorkspaceError> {
+    validate_history_dirs(workspace)?;
     let directory = workspace.root.join(HISTORY_DIR).join(CHANGES_DIR);
     if !directory.exists() {
         return Ok(Vec::new());
@@ -1529,8 +1582,20 @@ fn load_changes(workspace: &Workspace) -> Result<Vec<ChangeRecord>, WorkspaceErr
     let mut changes = Vec::new();
     for entry in fs::read_dir(&directory)? {
         let path = entry?.path();
+        if path_is_symlink(&path)? {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace history record cannot be a symbolic link: {}",
+                path.display()
+            )));
+        }
         if path.extension() != Some(OsStr::new("json")) {
             continue;
+        }
+        if !path.is_file() {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace history record is not a file: {}",
+                path.display()
+            )));
         }
         let change: ChangeRecord = read_json(&path)?;
         valid_id(&change.change_id)?;
@@ -2017,6 +2082,77 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
     })
 }
 
+pub(crate) fn mcp_preview(workspace: &Workspace, sql: &str) -> Result<PlanReport, WorkspaceError> {
+    Ok(PlanReport::from(&preview_plan(workspace, sql)?))
+}
+
+pub(crate) fn mcp_apply(
+    workspace: &Workspace,
+    plan_id: &str,
+) -> Result<ApplyReport, WorkspaceError> {
+    apply_plan(workspace, plan_id)
+}
+
+pub(crate) fn mcp_history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
+    history(workspace)
+}
+
+pub(crate) fn mcp_diff(
+    workspace: &Workspace,
+    change_id: Option<&str>,
+) -> Result<DiffReport, WorkspaceError> {
+    diff(workspace, change_id)
+}
+
+pub(crate) fn mcp_undo(
+    workspace: &Workspace,
+    change_id: &str,
+) -> Result<UndoReport, WorkspaceError> {
+    undo(workspace, change_id)
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ExportReport {
+    table: String,
+    format: String,
+    content: String,
+    bytes: usize,
+}
+
+pub(crate) fn mcp_export(
+    workspace: &Workspace,
+    table: &str,
+    format: &str,
+) -> Result<ExportReport, WorkspaceError> {
+    let format = DataFormat::parse(format)?;
+    if format == DataFormat::Json {
+        return Err(WorkspaceError::Usage(
+            "JSON export is JSON Lines; use jsonl".to_string(),
+        ));
+    }
+    let database = workspace.database()?;
+    let (columns, rows) = select_table(&database, table)?;
+    let bytes = match format {
+        DataFormat::Csv => export_csv(&columns, &rows)?,
+        DataFormat::JsonLines => export_json_lines(&columns, &rows)?,
+        DataFormat::Sql => export_sql(&database, table, &rows)?,
+        DataFormat::Json => unreachable!(),
+    };
+    let content = String::from_utf8(bytes.clone())
+        .map_err(|error| WorkspaceError::Invalid(format!("export is not valid UTF-8: {error}")))?;
+    Ok(ExportReport {
+        table: table.to_string(),
+        format: format.name().to_string(),
+        bytes: bytes.len(),
+        content,
+    })
+}
+
+pub(crate) fn mcp_inspect(workspace: &Workspace) -> Result<InspectReport, WorkspaceError> {
+    let database = workspace.database()?;
+    inspect(workspace, &database)
+}
+
 fn required_table(table: Option<&str>) -> Result<&str, WorkspaceError> {
     let table = table.ok_or_else(|| {
         WorkspaceError::Usage("row imports require --table NAME or a source filename".to_string())
@@ -2399,22 +2535,22 @@ fn sql_literal(value: &Value) -> String {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct InspectReport {
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct InspectReport {
     path: String,
     format_version: u32,
     database: String,
     tables: Vec<InspectTable>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct InspectTable {
     name: String,
     rows: usize,
     columns: Vec<InspectColumn>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct InspectColumn {
     name: String,
     data_type: &'static str,
@@ -2641,6 +2777,12 @@ fn write_output(
 }
 
 fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
+    if path_is_symlink(path)? {
+        return Err(WorkspaceError::Invalid(format!(
+            "refusing to write through a symbolic link: {}",
+            path.display()
+        )));
+    }
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2672,6 +2814,12 @@ fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
+    if path_is_symlink(path)? {
+        return Err(WorkspaceError::Invalid(format!(
+            "refusing to create through a symbolic link: {}",
+            path.display()
+        )));
+    }
     let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -2684,6 +2832,27 @@ fn path_is_symlink(path: &Path) -> Result<bool, WorkspaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(WorkspaceError::Io(error)),
     }
+}
+
+fn validate_database_paths(root: &Path) -> Result<(), WorkspaceError> {
+    let database = root.join(DATABASE_FILE);
+    if path_is_symlink(&database)? {
+        return Err(WorkspaceError::Invalid(
+            "workspace database cannot be a symbolic link".to_string(),
+        ));
+    }
+    for suffix in [".wal", ".lock", ".tmp"] {
+        let mut value = database.as_os_str().to_os_string();
+        value.push(suffix);
+        let path = PathBuf::from(value);
+        if path_is_symlink(&path)? {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace database sidecar cannot be a symbolic link: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn manifest_bytes(manifest: &WorkspaceManifest) -> Result<Vec<u8>, WorkspaceError> {

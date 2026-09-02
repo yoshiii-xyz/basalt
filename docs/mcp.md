@@ -30,6 +30,49 @@ The command requires Rust 1.88 or newer when building from source. If the MCP
 host does not inherit the user's `PATH`, use the absolute path printed by
 `command -v basalt` as the configuration's `command` value.
 
+## Choose a mode
+
+Use workspace mode for the product's agent workflow. It binds the server to a
+versioned Basalt workspace and exposes only scoped workspace tools. The path is
+the only data location the workspace tools can open:
+
+```json
+{
+  "mcpServers": {
+    "basalt": {
+      "command": "/absolute/path/to/.cargo/bin/basalt",
+      "args": ["mcp", "--workspace", "/absolute/path/to/project-data"]
+    }
+  }
+}
+```
+
+Workspace mode is read-only with respect to data by default. `workspace_preview`
+may create a local plan record, but it does not change database state. Add
+`--allow-writes` only when the host configuration has an explicit approval
+policy for applying plans and undoing changes:
+
+```json
+{
+  "mcpServers": {
+    "basalt": {
+      "command": "basalt",
+      "args": [
+        "mcp",
+        "--workspace",
+        "/absolute/path/to/project-data",
+        "--allow-writes"
+      ]
+    }
+  }
+}
+```
+
+Direct database mode remains available for compatibility with existing Basalt
+users. It is also read-only by default; `execute` and `checkpoint` require
+`--allow-writes`. Direct mode is not the scoped workspace workflow and exposes
+stateful SQL transactions instead of preview/apply lifecycle tools.
+
 ## Host configuration
 
 Use the host's MCP server configuration file. The common local-server shape is:
@@ -45,8 +88,23 @@ Use the host's MCP server configuration file. The common local-server shape is:
 }
 ```
 
+Add `--allow-writes` to a direct database configuration only when unrestricted
+SQL writes are intentionally approved:
+
+```json
+{
+  "mcpServers": {
+    "basalt": {
+      "command": "basalt",
+      "args": ["mcp", "/absolute/path/to/app.basalt", "--allow-writes"]
+    }
+  }
+}
+```
+
 Use `:memory:` instead of a file path when the database should disappear when
-the MCP process exits:
+the MCP process exits. This is useful for a read-only protocol smoke test or a
+session whose data is supplied entirely through approved direct SQL:
 
 ```json
 {
@@ -86,8 +144,48 @@ Prefer the installed binary: a host may restart an MCP server often, and
 
 ## Tool contract
 
-All SQL tools operate on one connection for the lifetime of the MCP process.
-That makes transactions span separate calls:
+Common tools in both modes are:
+
+| Tool | Use | Mutates data |
+| --- | --- | --- |
+| `query` | `SELECT` and `EXPLAIN SELECT` only | No |
+| `list_tables` | List tables and committed column metadata | No |
+| `describe_table` | Inspect one table's committed column metadata | No |
+| `checkpoint` | Flush a durable snapshot and clear old WAL frames | Filesystem state; requires approval |
+
+Workspace mode also provides:
+
+| Tool | Use | Mutates data |
+| --- | --- | --- |
+| `workspace_inspect` | Read workspace metadata, schema, and row counts | No |
+| `workspace_preview` | Execute a bounded mutation in isolation and save its exact plan | Plan metadata only |
+| `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
+| `workspace_history` | Read the change ledger and recovery statuses | Recovery metadata may be reconciled |
+| `workspace_diff` | Compare a change recovery point with current state | No |
+| `workspace_undo` | Restore the latest committed change's recovery point | Yes; requires approval |
+| `workspace_export` | Return one table as bounded CSV, JSON Lines, or SQL content | No |
+
+`execute` is available only in direct database mode. It is absent from the
+workspace tool list so agents do not see an operation that can bypass the
+workspace lifecycle.
+
+In workspace mode, use this sequence:
+
+1. Call `workspace_inspect` or `query` to understand the current data.
+2. Call `workspace_preview` with the mutation. Keep the returned `plan_id`.
+3. Have the operator approve the exact plan, then call `workspace_apply`.
+4. Use `workspace_history` and `workspace_diff` to inspect the committed change.
+5. Call `workspace_undo` with the latest change ID if the change should be
+   reversed.
+
+Workspace SQL calls open the workspace for one operation at a time. They do not
+provide a multi-call SQL transaction; the durable plan and recovery lifecycle
+is the transaction boundary. `workspace_apply` rejects stale plans and never
+silently applies a mutation against a changed base state.
+
+In direct database mode, all SQL tools operate on one connection for the
+lifetime of the MCP process. When `--allow-writes` is enabled, transactions can
+span separate calls:
 
 1. Call `execute` with `BEGIN;`.
 2. Call `execute` with the writes.
@@ -97,11 +195,7 @@ Available tools:
 
 | Tool | Use | Mutates data |
 | --- | --- | --- |
-| `query` | `SELECT` and `EXPLAIN SELECT` only | No |
-| `execute` | Writes, DDL, transactions, `CHECKPOINT`, and unrestricted SQL | Yes |
-| `list_tables` | List tables and committed column metadata | No |
-| `describe_table` | Inspect one table's committed column metadata | No |
-| `checkpoint` | Flush a durable snapshot and clear old WAL frames | Filesystem state only |
+| `execute` | Writes, DDL, transactions, `CHECKPOINT`, and unrestricted SQL | Yes; requires approval |
 
 `query` and `execute` accept:
 
@@ -129,16 +223,24 @@ without spending a tool call on a query.
 ## Durability and safety
 
 The MCP process has the same local filesystem access as the account that starts
-it. A host should only launch Basalt for a database the user intends the agent
-to access. `execute` can delete or change data; tool annotations identify that
-risk, but the host remains responsible for approval policy.
+it. A host should only launch Basalt for a database or workspace the user
+intends the agent to access. Tool annotations are hints for host UIs; Basalt
+also enforces the write flag itself. No host-specific approval behavior is
+assumed.
+
+Workspace export returns content rather than accepting an output path. This
+keeps the workspace MCP surface from becoming an arbitrary filesystem writer.
+The CLI export command remains available when a user intentionally chooses a
+destination.
 
 Use a durable path for work that must survive process restarts. Basalt appends
 committed writes to its WAL; call `checkpoint` when you want to fold the state
 into the snapshot and remove old WAL frames. `checkpoint` is a no-op for
-`:memory:`. A durable path is exclusively owned by one process; a second CLI
-or MCP process receives an "already open" error instead of competing for the
-same WAL.
+`:memory:`, but still requires `--allow-writes` because it is a write-capable
+operation in the protocol contract. A durable path is exclusively owned by one
+process; a second CLI or MCP process receives an "already open" error instead
+of competing for the same WAL. Workspace lifecycle operations likewise open
+the underlying database one at a time.
 
 ## Troubleshooting
 
