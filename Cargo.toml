@@ -1,5 +1,5 @@
 [package]
-name = "basalt"
+name = "basalt-db"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
@@ -9,10 +9,15 @@ readme = "README.md"
 repository = "https://github.com/joshiii-xyz/basalt"
 keywords = ["database", "embedded", "sql", "mcp", "ai"]
 categories = ["database-implementations", "command-line-utilities"]
+exclude = [".github/", "dist-workspace.toml"]
 
 [lib]
 name = "basalt"
 path = "src/lib.rs"
+
+[[bin]]
+name = "basalt"
+path = "src/main.rs"
 
 [dependencies]
 csv = "1.3"
@@ -32,3 +37,8 @@ harness = false
 opt-level = 3
 lto = true
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

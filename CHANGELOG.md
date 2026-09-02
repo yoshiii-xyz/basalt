@@ -16,6 +16,9 @@
 - Scoped MCP tool discovery by mode so direct database clients do not receive
   workspace-only tools and workspace clients cannot bypass the plan lifecycle
   with unrestricted SQL execution.
+- Added a `basalt-db` package boundary while preserving the `basalt` binary,
+  reproducible `dist` release configuration, checksummed installer workflow,
+  clean-binary smoke test, and scheduled RustSec dependency audit.
 - Completed the embedded SQL engine, storage, indexes, transactions, WAL
   recovery, planner, and command-line frontend.
 - Added script execution, CSV/JSON-lines output, schema discovery, crash

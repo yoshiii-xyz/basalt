@@ -121,12 +121,16 @@ The current repository already provides useful foundations:
 
 The current product still has blocking gaps:
 
-- It is installed from a checkout and has no published release artifact.
-- The package name `basalt` is already present in the crates.io index for an
-  unrelated project, so a published package name needs a deliberate decision
-  such as `basalt-db` while preserving the `basalt` binary if possible.
-- The file format is not SQLite-compatible and there is no import/export
-  workflow for common structured inputs.
+- It is installed from a checkout and has no published release artifact yet;
+  the checked-in `dist` configuration and release workflow now define the
+  normal-user path for the first tagged release.
+- The package name is `basalt-db` because `basalt` is already present in the
+  crates.io index for an unrelated project; the published library crate and
+  package name are now unambiguous while the installed binary remains
+  `basalt`.
+- The file format is not SQLite-compatible; the CLI's common-format import and
+  export path is intentionally a documented boundary rather than a promise of
+  SQLite-file interoperability.
 - The documented SQL dialect does not include prepared parameters, migrations,
   foreign keys, schema alteration, views, CTEs, or subqueries.
 - Durable database paths are intentionally exclusive to one process.
@@ -134,8 +138,8 @@ The current product still has blocking gaps:
   deterministic safety boundary.
 - The benchmark is an internal workload, not a comparable result against an
   incumbent.
-- There is no user-facing preview, change report, snapshot history, or undo
-  workflow.
+- No release has been published yet, so the normal-user install path is
+  defined but not externally verified from a clean machine.
 
 These gaps are not all equal. The first product release should fix the gaps
 that block the selected workflow, not attempt to make Basalt feature-complete
@@ -237,8 +241,9 @@ an ingestion script or knowing the internal file layout.
   read-only by default, bounded, typed, and covered by stdio wire tests for the
   full inspect-to-undo journey.
 - Milestone 5 remains open: incumbent benchmarks, differential/fuzz coverage,
-  normal-user release artifacts, and final packaging/security checks are not
-  complete yet.
+  and a published release still need to be completed. Package contents,
+  release generation, dependency auditing, and the clean-binary smoke path are
+  now implemented and verified locally.
 
 ### Milestone 3 — Reversible state
 

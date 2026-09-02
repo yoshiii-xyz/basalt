@@ -42,6 +42,20 @@ Rust 1.88 or newer is required.
 cargo install --path . --locked
 ```
 
+The published package name is `basalt-db`; the installed command remains
+`basalt`.
+
+Tagged releases also include checksummed installers and prebuilt binaries for
+Linux, macOS, and Windows. After the first release is published, a normal
+desktop install can use:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joshiii-xyz/basalt/releases/latest/download/basalt-db-installer.sh | sh
+```
+
+The Rust package is not published yet. When it is, the package install path
+will be `cargo install basalt-db --locked`.
+
 To run directly from a checkout:
 
 ```bash
@@ -204,7 +218,8 @@ cargo build --release --locked
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
 [CHANGELOG.md](CHANGELOG.md) for project history. The release checklist is in
-[docs/release.md](docs/release.md).
+[docs/release.md](docs/release.md), including the generated release workflow
+and clean-binary smoke test.
 
 ## License
 
