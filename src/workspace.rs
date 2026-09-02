@@ -1326,12 +1326,14 @@ struct TableSnapshot {
 }
 
 fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
-    let plan = build_preview_plan(workspace, sql)?;
-    persist_plan(workspace, &plan)?;
-    Ok(plan)
+    preview_plan_with_output_limit(workspace, sql, None)
 }
 
-fn build_preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
+fn preview_plan_with_output_limit(
+    workspace: &Workspace,
+    sql: &str,
+    max_output_bytes: Option<usize>,
+) -> Result<PlanRecord, WorkspaceError> {
     if sql.len() > MAX_PREVIEW_BYTES {
         return Err(WorkspaceError::Invalid(format!(
             "SQL exceeds the {} MiB preview limit",
@@ -1396,6 +1398,18 @@ fn build_preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, Wo
         sql: sql.to_string(),
         statements: preview_items,
     };
+    if let Some(max_output_bytes) = max_output_bytes {
+        let report = PlanReport::from(&plan);
+        let output_size = serde_json::to_vec(&report)?.len();
+        if output_size > max_output_bytes {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace preview is {output_size} bytes; response limit is {max_output_bytes} bytes"
+            )));
+        }
+    }
+    // Keep the database handle live through persistence so another process
+    // cannot change the state between the captured fingerprint and plan write.
+    persist_plan(workspace, &plan)?;
     Ok(plan)
 }
 
@@ -2252,16 +2266,8 @@ pub(crate) fn mcp_preview(
     sql: &str,
     max_output_bytes: usize,
 ) -> Result<PlanReport, WorkspaceError> {
-    let plan = build_preview_plan(workspace, sql)?;
-    let report = PlanReport::from(&plan);
-    let output_size = serde_json::to_vec(&report)?.len();
-    if output_size > max_output_bytes {
-        return Err(WorkspaceError::Invalid(format!(
-            "workspace preview is {output_size} bytes; response limit is {max_output_bytes} bytes"
-        )));
-    }
-    persist_plan(workspace, &plan)?;
-    Ok(report)
+    let plan = preview_plan_with_output_limit(workspace, sql, Some(max_output_bytes))?;
+    Ok(PlanReport::from(&plan))
 }
 
 pub(crate) fn mcp_apply(
