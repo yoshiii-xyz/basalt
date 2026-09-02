@@ -65,3 +65,20 @@ jobs:
 
       - name: Check all targets at the MSRV
         run: cargo +1.88.0 check --all-targets --locked
+
+  portability:
+    name: Portability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check all targets on supported desktop runners
+        run: cargo check --all-targets --locked

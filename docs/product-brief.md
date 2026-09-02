@@ -249,8 +249,9 @@ an ingestion script or knowing the internal file layout.
   supported-subset differential checks, compatibility policy, parser and
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests
-  are implemented and verified locally. No public release or adoption claim is
-  made until a release is actually published and exercised by external users.
+  are implemented and verified locally; hosted CI also checks macOS and Windows
+  compilation. No public release or adoption claim is made until a release is
+  actually published and exercised by external users.
 
 ### Milestone 3 — Reversible state
 

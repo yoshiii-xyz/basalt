@@ -55,6 +55,10 @@ but every archive contains a `basalt` executable. Do not describe a crates.io
 install or a prebuilt download as available until that artifact has actually
 been published.
 
+The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
+and compiles all targets on macOS and Windows runners. The release workflow's
+artifact matrix remains the source of truth for the published architectures.
+
 ## Smoke tests
 
 1. Install the binary from the checkout with `cargo install --path . --locked`
