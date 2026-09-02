@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Enforced the MCP execution budget inside the SQL engine so `max_rows` is not
+  the only protection against large scans, joins, aggregates, or mutations;
+  over-budget operations fail before their state or response is published.
 - Added release-archive verification for checksums, required files, executable
   contents, and unsafe archive members; the release host job also runs the
   extracted Linux artifact through the installed-binary smoke journey.

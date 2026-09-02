@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::database::Database;
 use crate::db::{Column, DbError, StatementResult};
+use crate::engine::{ExecutionBudget, MCP_EXECUTION_WORK_LIMIT};
 use crate::sql::ast::Statement;
 use crate::sql::parser::parse;
 use crate::types::{ColumnType, Value};
@@ -445,7 +446,7 @@ pub fn run<R: Read, W: Write>(
             json,
         } => {
             let workspace = Workspace::open(workspace)?;
-            let report = apply_plan(&workspace, &plan_id)?;
+            let report = apply_plan(&workspace, &plan_id, None)?;
             if json {
                 serde_json::to_writer_pretty(&mut *output, &report)?;
                 output.write_all(b"\n")?;
@@ -1352,13 +1353,14 @@ struct TableSnapshot {
 }
 
 fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
-    preview_plan_with_output_limit(workspace, sql, None)
+    preview_plan_with_output_limit(workspace, sql, None, None)
 }
 
 fn preview_plan_with_output_limit(
     workspace: &Workspace,
     sql: &str,
     max_output_bytes: Option<usize>,
+    max_work: Option<usize>,
 ) -> Result<PlanRecord, WorkspaceError> {
     if sql.len() > MAX_PREVIEW_BYTES {
         return Err(WorkspaceError::Invalid(format!(
@@ -1406,11 +1408,15 @@ fn preview_plan_with_output_limit(
     database.checkpoint()?;
     let base_generation = database.generation();
     let base_state = state_fingerprint(&workspace.database_path())?;
-    let mut transaction = database.begin()?;
+    let mut connection = database.connect();
+    connection.execute_sql("BEGIN")?;
     let result = (|| {
+        let mut budget = max_work
+            .map(ExecutionBudget::bounded)
+            .unwrap_or_else(ExecutionBudget::unlimited);
         let mut items = Vec::with_capacity(statements.len());
         for (index, statement) in statements.iter().enumerate() {
-            let result = transaction.execute(statement)?;
+            let result = connection.execute_with_budget(statement, &mut budget)?;
             if let StatementResult::Select { rows, .. } = &result
                 && rows.len() > MAX_PREVIEW_ROWS
             {
@@ -1422,8 +1428,9 @@ fn preview_plan_with_output_limit(
         }
         Ok::<Vec<PreviewItem>, WorkspaceError>(items)
     })();
-    transaction.rollback();
+    let rollback = connection.execute_sql("ROLLBACK");
     let preview_items = result?;
+    rollback?;
     let plan_id = plan_id_for(&base_state, sql);
     let plan = PlanRecord {
         format_version: FORMAT_VERSION,
@@ -1892,6 +1899,7 @@ fn latest_committed(changes: &[ChangeRecord]) -> Option<&ChangeRecord> {
 fn apply_plan(
     workspace: &Workspace,
     requested_plan_id: &str,
+    max_work: Option<usize>,
 ) -> Result<ApplyReport, WorkspaceError> {
     let plan = load_plan(workspace, requested_plan_id)?;
     if !plan.statements.iter().any(|item| item.mutating) {
@@ -1992,7 +2000,10 @@ fn apply_plan(
         write_atomic_json(&change_file, &change)?;
         return Err(error.into());
     }
-    let execution = connection.execute_sql(&plan.sql);
+    let execution = match max_work {
+        Some(max_work) => connection.execute_sql_with_budget(&plan.sql, max_work),
+        None => connection.execute_sql(&plan.sql),
+    };
     if let Err(error) = execution {
         let _ = connection.execute_sql("ROLLBACK");
         change.status = ChangeStatus::Failed;
@@ -2319,7 +2330,12 @@ pub(crate) fn mcp_preview(
     sql: &str,
     max_output_bytes: usize,
 ) -> Result<PlanReport, WorkspaceError> {
-    let plan = preview_plan_with_output_limit(workspace, sql, Some(max_output_bytes))?;
+    let plan = preview_plan_with_output_limit(
+        workspace,
+        sql,
+        Some(max_output_bytes),
+        Some(MCP_EXECUTION_WORK_LIMIT),
+    )?;
     Ok(PlanReport::from(&plan))
 }
 
@@ -2327,7 +2343,7 @@ pub(crate) fn mcp_apply(
     workspace: &Workspace,
     plan_id: &str,
 ) -> Result<ApplyReport, WorkspaceError> {
-    apply_plan(workspace, plan_id)
+    apply_plan(workspace, plan_id, Some(MCP_EXECUTION_WORK_LIMIT))
 }
 
 pub(crate) fn mcp_history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {

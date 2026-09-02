@@ -166,7 +166,9 @@ The current product still has blocking gaps:
   serialized within that owner process because hosts may dispatch requests
   concurrently.
 - MCP `execute` is powerful and can mutate data; annotations alone are not a
-  deterministic safety boundary.
+  deterministic safety boundary. Its SQL engine now also enforces a
+  1,000,000-unit cooperative work budget per request, but explicit write
+  approval and the workspace plan lifecycle remain required.
 - The benchmark is an internal workload, not a comparable result against an
   incumbent.
 - No release has been published yet, so the normal-user install path is
@@ -223,8 +225,9 @@ database-level snapshot diff. The output should state its precision honestly.
 - Structured-data imports are explicit, content-based, bounded, and recoverable;
   MCP never accepts an arbitrary source path or SQL dump as an import payload.
 - Requests have limits for SQL size, rows, statements, mutation count, and
-  output size; MCP workspace diffs also cap the rows inspected in each
-  compared database.
+  output size; MCP SQL also has an engine-enforced work budget so `max_rows`
+  cannot be mistaken for an execution bound. MCP workspace diffs also cap the
+  rows inspected in each compared database.
 - A failed preview never changes durable state.
 - An applied operation always has a recovery point or fails before mutation.
 - Exact import, apply, and undo retries return the original receipt only when
@@ -288,10 +291,10 @@ an ingestion script or knowing the internal file layout.
   points, table-level diffs, history, latest-change-only undo, and crash
   reconciliation are implemented and covered by failure-injection tests.
 - Milestone 4 is complete: workspace-aware MCP tools are scoped by mode,
-  read-only by default, bounded, typed, and covered by stdio wire tests for the
-  full ingest-to-undo journey without shelling out. Workspace MCP imports are
-  limited to structured row formats, require explicit writes, and create
-  recovery points.
+  read-only by default, engine-bounded, typed, and covered by stdio wire tests
+  for the full ingest-to-undo journey without shelling out. Workspace MCP
+  imports are limited to structured row formats, require explicit writes, and
+  create recovery points.
 - Milestone 5 remains open only for publication and external-user validation.
   Hosted release evidence is complete: the incumbent benchmark harness,
   recorded SQLite/DuckDB snapshot, and first full comparison run are complete;

@@ -32,7 +32,7 @@ not a SQLite-compatible replacement or a hosted database.
 - Portable workspaces with versioned metadata and atomic CSV, JSON/JSONL, and
   SQL dump import/export.
 - Installable MCP server with typed SQL tools, bounded workspace imports and
-  exports, schema resources, and recoverable agent changes.
+  exports, engine-bounded SQL, schema resources, and recoverable agent changes.
 
 ## Installation
 

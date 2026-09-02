@@ -14,7 +14,88 @@ use crate::planner::{self, AccessPath};
 use crate::sql::ast::{ColumnDef, Expr, JoinKind, SelectItems, Statement};
 use crate::types::Value;
 
+pub(crate) const MCP_EXECUTION_WORK_LIMIT: usize = 1_000_000;
+
+#[derive(Debug)]
+pub(crate) struct ExecutionBudget {
+    limit: Option<usize>,
+    remaining: Option<usize>,
+}
+
+impl ExecutionBudget {
+    pub(crate) fn unlimited() -> Self {
+        Self {
+            limit: None,
+            remaining: None,
+        }
+    }
+
+    pub(crate) fn bounded(limit: usize) -> Self {
+        Self {
+            limit: Some(limit),
+            remaining: Some(limit),
+        }
+    }
+
+    fn consume(&mut self, units: usize, operation: &str) -> Result<(), DbError> {
+        let Some(remaining) = &mut self.remaining else {
+            return Ok(());
+        };
+        if units > *remaining {
+            *remaining = 0;
+            let limit = self.limit.expect("bounded budgets have a limit");
+            return Err(dberr(
+                DbErrorKind::Limit,
+                format!(
+                    "execution exceeded the {limit}-unit work limit while {operation}; narrow the query or use the CLI for larger jobs"
+                ),
+            ));
+        }
+        *remaining -= units;
+        Ok(())
+    }
+
+    fn row(&mut self, row: &Row, operation: &str) -> Result<(), DbError> {
+        self.consume(row_work_units(row), operation)
+    }
+
+    fn table_clone(&mut self, table: &Table, operation: &str) -> Result<(), DbError> {
+        let units = table
+            .scan()
+            .fold(table.columns.len().max(1), |total, (_, row)| {
+                total.saturating_add(row_work_units(row))
+            });
+        self.consume(units, operation)
+    }
+}
+
+fn value_work_units(value: &Value) -> usize {
+    match value {
+        Value::Text(value) => value.len().saturating_add(1023) / 1024 + 1,
+        _ => 1,
+    }
+}
+
+fn row_work_units(row: &Row) -> usize {
+    row.iter().map(value_work_units).sum::<usize>().max(1)
+}
+
+fn joined_row_work_units(left: &Row, right: &Row) -> usize {
+    row_work_units(left)
+        .saturating_add(row_work_units(right))
+        .saturating_add(1)
+}
+
 pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, DbError> {
+    let mut budget = ExecutionBudget::unlimited();
+    execute_with_budget(state, stmt, &mut budget)
+}
+
+pub(crate) fn execute_with_budget(
+    state: &mut State,
+    stmt: &Statement,
+    budget: &mut ExecutionBudget,
+) -> Result<StatementResult, DbError> {
     match stmt {
         Statement::CreateTable {
             name,
@@ -37,6 +118,9 @@ pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, D
             Ok(StatementResult::CreateTable { name: name.clone() })
         }
         Statement::DropTable { name, if_exists } => {
+            if let Some(table) = state.table(name) {
+                budget.table_clone(table, "dropping a table")?;
+            }
             if state.remove_table(name).is_none() {
                 if *if_exists {
                     return Ok(StatementResult::DropTable { name: name.clone() });
@@ -68,7 +152,7 @@ pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, D
                     format!("index '{name}' already exists"),
                 ));
             }
-            let table_ref = state.table_mut(table).ok_or_else(|| {
+            let table_ref = state.table(table).ok_or_else(|| {
                 dberr(DbErrorKind::UnknownTable, format!("no such table: {table}"))
             })?;
             if table_ref.has_index(name) {
@@ -84,6 +168,8 @@ pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, D
                     format!("index '{name}' already exists"),
                 ));
             }
+            budget.table_clone(table_ref, "building an index")?;
+            let table_ref = state.table_mut(table).unwrap();
             let column_index = table_ref.column_index(column)?;
             table_ref.create_index(name, column_index, *unique)?;
             Ok(StatementResult::CreateIndex {
@@ -109,23 +195,23 @@ pub fn execute(state: &mut State, stmt: &Statement) -> Result<StatementResult, D
             table,
             columns,
             rows,
-        } => exec_insert(state, table, columns, rows),
+        } => exec_insert(state, table, columns, rows, budget),
         Statement::InsertSelect {
             table,
             columns,
             query,
-        } => exec_insert_select(state, table, columns, query),
-        Statement::Select { .. } => exec_select(state, stmt),
-        Statement::Explain(inner) => exec_explain(state, inner),
+        } => exec_insert_select(state, table, columns, query, budget),
+        Statement::Select { .. } => exec_select(state, stmt, budget),
+        Statement::Explain(inner) => exec_explain(state, inner, budget),
         Statement::Update {
             table,
             assignments,
             where_clause,
-        } => exec_update(state, table, assignments, where_clause),
+        } => exec_update(state, table, assignments, where_clause, budget),
         Statement::Delete {
             table,
             where_clause,
-        } => exec_delete(state, table, where_clause),
+        } => exec_delete(state, table, where_clause, budget),
         Statement::Begin => Ok(StatementResult::Begin),
         Statement::Commit => Ok(StatementResult::Commit),
         Statement::Rollback => Ok(StatementResult::Rollback),
@@ -156,6 +242,7 @@ fn exec_insert(
     table_name: &str,
     columns: &Option<Vec<String>>,
     rows: &[Vec<Expr>],
+    budget: &mut ExecutionBudget,
 ) -> Result<StatementResult, DbError> {
     let table = state.table(table_name).ok_or_else(|| {
         dberr(
@@ -178,9 +265,11 @@ fn exec_insert(
         return Ok(StatementResult::Insert { rows_affected: 0 });
     }
     let expected = column_indices.len();
+    budget.table_clone(table, "preparing an insert")?;
     let table = state.table_mut(table_name).unwrap();
     let mut candidate = table.clone();
     for values_expr in rows {
+        budget.consume(expected.max(1), "materializing inserted rows")?;
         if values_expr.len() != expected {
             return Err(dberr(
                 DbErrorKind::ColumnCount,
@@ -194,6 +283,7 @@ fn exec_insert(
         for (column, expr) in column_indices.iter().zip(values_expr) {
             values[*column] = candidate.coerce_val(&eval_const(expr)?, *column)?;
         }
+        budget.row(&values, "materializing inserted rows")?;
         candidate.insert_row(values)?;
     }
     let count = rows.len();
@@ -208,6 +298,7 @@ fn exec_insert_select(
     table_name: &str,
     columns: &Option<Vec<String>>,
     query: &Statement,
+    budget: &mut ExecutionBudget,
 ) -> Result<StatementResult, DbError> {
     if !matches!(query, Statement::Select { .. }) {
         return Err(dberr(
@@ -215,7 +306,7 @@ fn exec_insert_select(
             "INSERT SELECT requires a SELECT query",
         ));
     }
-    let selected = match exec_select(state, query)? {
+    let selected = match exec_select(state, query, budget)? {
         StatementResult::Select { rows, .. } => rows,
         _ => unreachable!(),
     };
@@ -237,9 +328,11 @@ fn exec_insert_select(
         None => (0..table.columns.len()).collect(),
     };
     let expected = column_indices.len();
+    budget.table_clone(table, "preparing an insert")?;
     let table = state.table_mut(table_name).unwrap();
     let mut candidate = table.clone();
     for source in &selected {
+        budget.row(source, "materializing inserted rows")?;
         if source.len() != expected {
             return Err(dberr(
                 DbErrorKind::ColumnCount,
@@ -261,7 +354,11 @@ fn exec_insert_select(
     })
 }
 
-fn exec_explain(state: &State, stmt: &Statement) -> Result<StatementResult, DbError> {
+fn exec_explain(
+    state: &State,
+    stmt: &Statement,
+    budget: &mut ExecutionBudget,
+) -> Result<StatementResult, DbError> {
     let Statement::Select {
         from,
         from_alias,
@@ -286,6 +383,13 @@ fn exec_explain(state: &State, stmt: &Statement) -> Result<StatementResult, DbEr
         from_alias.as_deref().or(Some(from)),
         where_clause.as_ref(),
     );
+    let candidate_count = match &plan.access {
+        AccessPath::TableScan => 0,
+        AccessPath::IndexScan { row_ids, .. } | AccessPath::IndexRange { row_ids, .. } => {
+            row_ids.len()
+        }
+    };
+    budget.consume(candidate_count, "building an index access plan")?;
     let text = match plan.access {
         AccessPath::TableScan => format!(
             "TableScan table={from} estimated_rows={}",
@@ -337,7 +441,11 @@ fn relation_schema(table: &Table, alias: Option<&str>) -> Vec<ColumnBinding> {
         .collect()
 }
 
-fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbError> {
+fn exec_select(
+    state: &State,
+    stmt: &Statement,
+    budget: &mut ExecutionBudget,
+) -> Result<StatementResult, DbError> {
     let Statement::Select {
         distinct,
         columns,
@@ -374,15 +482,23 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
             from_alias.as_deref().or(Some(from)),
             where_clause.as_ref(),
         );
-        let base_rows: Vec<Row> = match base_plan.access {
-            AccessPath::TableScan => base.scan().map(|(_, row)| row.clone()).collect(),
-            AccessPath::IndexScan { row_ids, .. } | AccessPath::IndexRange { row_ids, .. } => {
-                row_ids
-                    .into_iter()
-                    .filter_map(|rid| base.get_row(rid).cloned())
-                    .collect()
+        let mut base_rows = Vec::new();
+        match base_plan.access {
+            AccessPath::TableScan => {
+                for (_, row) in base.scan() {
+                    budget.row(row, "scanning the base table")?;
+                    base_rows.push(row.clone());
+                }
             }
-        };
+            AccessPath::IndexScan { row_ids, .. } | AccessPath::IndexRange { row_ids, .. } => {
+                for rid in row_ids {
+                    if let Some(row) = base.get_row(rid) {
+                        budget.row(row, "materializing index matches")?;
+                        base_rows.push(row.clone());
+                    }
+                }
+            }
+        }
         let input = base_rows
             .into_iter()
             .map(|values| QueryRow { values })
@@ -404,13 +520,22 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
             reject_aggregate(on, "JOIN ON")?;
             eval::validate_with_schema(&joined_schema, on)?;
         }
-        let right_rows: Vec<Row> = right.scan().map(|(_, row)| row.clone()).collect();
+        let mut right_rows = Vec::new();
+        for (_, row) in right.scan() {
+            budget.row(row, "scanning a joined table")?;
+            right_rows.push(row.clone());
+        }
+        budget.consume(right_rows.len(), "tracking join matches")?;
         let mut next = Vec::new();
         let mut matched_right = vec![false; right_rows.len()];
         if join.kind == JoinKind::Right {
             for (right_index, right_row) in right_rows.iter().enumerate() {
                 let mut matched = false;
                 for left in &input {
+                    budget.consume(
+                        joined_row_work_units(&left.values, right_row),
+                        "materializing join candidates",
+                    )?;
                     let mut values = left.values.clone();
                     values.extend(right_row.iter().cloned());
                     if join_passes(&join.kind, &join.on, &joined_schema, &values)? {
@@ -419,6 +544,12 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
                     }
                 }
                 if !matched {
+                    budget.consume(
+                        input_schema_width(&schema)
+                            .saturating_add(row_work_units(right_row))
+                            .saturating_add(1),
+                        "materializing an unmatched join row",
+                    )?;
                     let mut values = vec![Value::Null; input_schema_width(&schema)];
                     values.extend(right_row.iter().cloned());
                     next.push(QueryRow { values });
@@ -429,6 +560,10 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
             for left in &input {
                 let mut matched = false;
                 for (right_index, right_row) in right_rows.iter().enumerate() {
+                    budget.consume(
+                        joined_row_work_units(&left.values, right_row),
+                        "materializing join candidates",
+                    )?;
                     let mut values = left.values.clone();
                     values.extend(right_row.iter().cloned());
                     if join_passes(&join.kind, &join.on, &joined_schema, &values)? {
@@ -438,6 +573,12 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
                     }
                 }
                 if (join.kind == JoinKind::Left || join.kind == JoinKind::Full) && !matched {
+                    budget.consume(
+                        row_work_units(&left.values)
+                            .saturating_add(right.columns.len())
+                            .saturating_add(1),
+                        "materializing an unmatched join row",
+                    )?;
                     let mut values = left.values.clone();
                     values.extend(std::iter::repeat_n(Value::Null, right.columns.len()));
                     next.push(QueryRow { values });
@@ -446,6 +587,12 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
             if join.kind == JoinKind::Full {
                 for (right_index, right_row) in right_rows.iter().enumerate() {
                     if !matched_right[right_index] {
+                        budget.consume(
+                            input_schema_width(&schema)
+                                .saturating_add(row_work_units(right_row))
+                                .saturating_add(1),
+                            "materializing an unmatched join row",
+                        )?;
                         let mut values = vec![Value::Null; input_schema_width(&schema)];
                         values.extend(right_row.iter().cloned());
                         next.push(QueryRow { values });
@@ -497,6 +644,7 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
 
     let mut filtered = Vec::with_capacity(input.len());
     for row in input {
+        budget.row(&row.values, "evaluating a filter")?;
         if where_clause
             .as_ref()
             .map(|predicate| eval::where_matches_with_schema(&schema, &row.values, predicate))
@@ -512,11 +660,15 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
         SelectItems::List(items) => items.iter().any(eval::contains_aggregate),
     } || having.as_ref().is_some_and(eval::contains_aggregate);
     let grouped = has_aggregate || !group_by.is_empty() || having.is_some();
-    let groups = make_groups(&schema, filtered, group_by, grouped)?;
+    let groups = make_groups(&schema, filtered, group_by, grouped, budget)?;
 
     let output_names = select_output_names(&schema, columns, &expanded_items);
     let mut projected: Vec<(Row, Vec<Value>)> = Vec::new();
     for group in groups {
+        let group_work = group.iter().fold(1usize, |total, row| {
+            total.saturating_add(row_work_units(row))
+        });
+        budget.consume(group_work, "evaluating a result group")?;
         if let Some(predicate) = having
             && !eval::eval_group(&schema, &group, predicate)?
                 .is_truthy()
@@ -535,10 +687,20 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
         for (expression, _) in &effective_order {
             keys.push(eval::eval_group(&schema, &group, expression)?);
         }
+        budget.consume(
+            row_work_units(&row)
+                .saturating_add(keys.iter().map(value_work_units).sum())
+                .saturating_add(1),
+            "materializing a result row",
+        )?;
         projected.push((row, keys));
     }
 
     if !effective_order.is_empty() {
+        budget.consume(
+            projected.len().saturating_mul(effective_order.len().max(1)),
+            "sorting result rows",
+        )?;
         projected.sort_by(|left, right| {
             for (index, (_, ascending)) in effective_order.iter().enumerate() {
                 let mut ordering = left.1[index].cmp_value(&right.1[index]);
@@ -555,14 +717,20 @@ fn exec_select(state: &State, stmt: &Statement) -> Result<StatementResult, DbErr
     let mut rows: Vec<Row> = projected.into_iter().map(|(row, _)| row).collect();
     if *distinct {
         let mut seen = Vec::new();
-        rows.retain(|row| {
-            if seen.contains(row) {
-                false
-            } else {
+        let mut distinct_rows = Vec::new();
+        for row in rows {
+            budget.consume(
+                seen.len()
+                    .saturating_add(row_work_units(&row))
+                    .saturating_add(1),
+                "deduplicating result rows",
+            )?;
+            if !seen.contains(&row) {
                 seen.push(row.clone());
-                true
+                distinct_rows.push(row);
             }
-        });
+        }
+        rows = distinct_rows;
     }
     if let Some(offset) = offset {
         if *offset >= rows.len() as u64 {
@@ -602,6 +770,7 @@ fn make_groups(
     rows: Vec<Row>,
     group_by: &[Expr],
     grouped: bool,
+    budget: &mut ExecutionBudget,
 ) -> Result<Vec<Vec<Row>>, DbError> {
     if !grouped {
         return Ok(rows.into_iter().map(|row| vec![row]).collect());
@@ -611,6 +780,7 @@ fn make_groups(
     }
     let mut groups: Vec<(Vec<Value>, Vec<Row>)> = Vec::new();
     for row in rows {
+        budget.row(&row, "evaluating group keys")?;
         let key = group_by
             .iter()
             .map(|expr| eval::eval_with_schema(schema, &row, expr))
@@ -737,6 +907,7 @@ fn exec_update(
     table_name: &str,
     assignments: &[(String, Expr)],
     where_clause: &Option<Expr>,
+    budget: &mut ExecutionBudget,
 ) -> Result<StatementResult, DbError> {
     let targets = {
         let table = state.table(table_name).ok_or_else(|| {
@@ -761,16 +932,20 @@ fn exec_update(
         }
         targets
     };
+    let table = state.table(table_name).unwrap();
+    budget.table_clone(table, "preparing an update")?;
     let mut plan = Vec::new();
     {
         let table = state.table(table_name).unwrap();
         for (rid, row) in table.scan() {
+            budget.row(row, "scanning rows for update")?;
             if where_clause
                 .as_ref()
                 .map(|predicate| eval::where_matches(table, row, predicate))
                 .transpose()?
                 .unwrap_or(true)
             {
+                budget.row(row, "materializing updated rows")?;
                 let mut new_row = row.clone();
                 for (index, (_, expr)) in assignments.iter().enumerate() {
                     let value = eval::eval(table, row, expr)?;
@@ -817,6 +992,7 @@ fn exec_delete(
     state: &mut State,
     table_name: &str,
     where_clause: &Option<Expr>,
+    budget: &mut ExecutionBudget,
 ) -> Result<StatementResult, DbError> {
     let mut ids = Vec::new();
     {
@@ -832,6 +1008,7 @@ fn exec_delete(
             eval::validate_with_schema(&schema, predicate)?;
         }
         for (rid, row) in table.scan() {
+            budget.row(row, "scanning rows for delete")?;
             if where_clause
                 .as_ref()
                 .map(|predicate| eval::where_matches(table, row, predicate))
@@ -842,6 +1019,8 @@ fn exec_delete(
             }
         }
     }
+    let table = state.table(table_name).unwrap();
+    budget.table_clone(table, "preparing a delete")?;
     let table = state.table_mut(table_name).unwrap();
     let mut candidate = table.clone();
     for rid in &ids {
@@ -851,4 +1030,66 @@ fn exec_delete(
     Ok(StatementResult::Delete {
         rows_affected: ids.len(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::parser::parse;
+
+    fn state_with_rows(count: i64) -> State {
+        let mut state = State::empty();
+        let mut table = Table::new(
+            "items",
+            vec![Column {
+                name: "id".into(),
+                ty: crate::types::ColumnType::Integer,
+                not_null: false,
+                unique: false,
+                primary_key: false,
+            }],
+        )
+        .unwrap();
+        for id in 0..count {
+            table.insert_row(vec![Value::Integer(id)]).unwrap();
+        }
+        state.tables.insert("items".into(), table);
+        state
+    }
+
+    #[test]
+    fn bounded_execution_rejects_materialization_before_result_conversion() {
+        let mut state = state_with_rows(10);
+        let statement = parse("SELECT * FROM items").unwrap().remove(0);
+        let mut budget = ExecutionBudget::bounded(5);
+
+        let error = execute_with_budget(&mut state, &statement, &mut budget).unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        assert!(error.message.contains("work limit"));
+    }
+
+    #[test]
+    fn bounded_mutation_does_not_publish_partial_state() {
+        let mut state = state_with_rows(4);
+        let statement = parse("UPDATE items SET id = id + 1").unwrap().remove(0);
+        let mut budget = ExecutionBudget::bounded(10);
+
+        let error = execute_with_budget(&mut state, &statement, &mut budget).unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        let query = parse("SELECT id FROM items ORDER BY id").unwrap().remove(0);
+        let StatementResult::Select { rows, .. } = execute(&mut state, &query).unwrap() else {
+            panic!("expected select result");
+        };
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Integer(0)],
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ]
+        );
+    }
 }

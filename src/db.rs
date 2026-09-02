@@ -33,6 +33,7 @@ pub enum DbErrorKind {
     Io(String),
     Busy,
     Transaction,
+    Limit,
     Internal(String),
 }
 

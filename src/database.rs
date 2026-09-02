@@ -155,6 +155,15 @@ impl Database {
 
     /// Execute one statement as an autocommit operation.
     pub fn execute(&self, stmt: &Statement) -> Result<StatementResult, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.execute_with_budget(stmt, &mut budget)
+    }
+
+    pub(crate) fn execute_with_budget(
+        &self,
+        stmt: &Statement,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<StatementResult, DbError> {
         match stmt {
             Statement::Checkpoint => {
                 self.checkpoint()?;
@@ -165,7 +174,7 @@ impl Database {
             Statement::Rollback => Ok(StatementResult::Rollback),
             _ => {
                 let mut transaction = self.begin()?;
-                let result = transaction.execute(stmt)?;
+                let result = transaction.execute_with_budget(stmt, budget)?;
                 if is_mutation(&result) {
                     transaction.commit()?;
                 } else {
@@ -179,6 +188,14 @@ impl Database {
     /// Parse and execute all statements through a fresh autocommit connection.
     pub fn execute_sql(&self, sql: &str) -> Result<Vec<StatementResult>, DbError> {
         self.connect().execute_sql(sql)
+    }
+
+    pub(crate) fn execute_sql_with_budget(
+        &self,
+        sql: &str,
+        max_work: usize,
+    ) -> Result<Vec<StatementResult>, DbError> {
+        self.connect().execute_sql_with_budget(sql, max_work)
     }
 
     /// Flush the current state into the page file and clear committed WAL
@@ -288,6 +305,15 @@ pub struct Connection {
 
 impl Connection {
     pub fn execute(&mut self, stmt: &Statement) -> Result<StatementResult, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.execute_with_budget(stmt, &mut budget)
+    }
+
+    pub(crate) fn execute_with_budget(
+        &mut self,
+        stmt: &Statement,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<StatementResult, DbError> {
         match stmt {
             Statement::Checkpoint => {
                 if self.transaction.is_some() {
@@ -323,13 +349,31 @@ impl Connection {
                 Ok(StatementResult::Rollback)
             }
             _ => match self.transaction.as_mut() {
-                Some(transaction) => transaction.execute(stmt),
-                None => self.db.execute(stmt),
+                Some(transaction) => transaction.execute_with_budget(stmt, budget),
+                None => self.db.execute_with_budget(stmt, budget),
             },
         }
     }
 
     pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<StatementResult>, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.execute_sql_using_budget(sql, &mut budget)
+    }
+
+    pub(crate) fn execute_sql_with_budget(
+        &mut self,
+        sql: &str,
+        max_work: usize,
+    ) -> Result<Vec<StatementResult>, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::bounded(max_work);
+        self.execute_sql_using_budget(sql, &mut budget)
+    }
+
+    fn execute_sql_using_budget(
+        &mut self,
+        sql: &str,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<Vec<StatementResult>, DbError> {
         let statements = parse(sql).map_err(|e| {
             dberr(
                 DbErrorKind::Syntax(e.message.clone()),
@@ -338,7 +382,7 @@ impl Connection {
         })?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
-            results.push(self.execute(&statement)?);
+            results.push(self.execute_with_budget(&statement, budget)?);
         }
         Ok(results)
     }
@@ -365,6 +409,15 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn execute(&mut self, stmt: &Statement) -> Result<StatementResult, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.execute_with_budget(stmt, &mut budget)
+    }
+
+    pub(crate) fn execute_with_budget(
+        &mut self,
+        stmt: &Statement,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<StatementResult, DbError> {
         if !self.active {
             return Err(dberr(DbErrorKind::Transaction, "transaction is closed"));
         }
@@ -376,7 +429,7 @@ impl Transaction {
                 ))
             }
             _ => {
-                let result = crate::engine::execute(&mut self.state, stmt)?;
+                let result = crate::engine::execute_with_budget(&mut self.state, stmt, budget)?;
                 if is_mutation(&result) {
                     self.dirty = true;
                 }
@@ -386,6 +439,15 @@ impl Transaction {
     }
 
     pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<StatementResult>, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.execute_sql_using_budget(sql, &mut budget)
+    }
+
+    fn execute_sql_using_budget(
+        &mut self,
+        sql: &str,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<Vec<StatementResult>, DbError> {
         let statements = parse(sql).map_err(|e| {
             dberr(
                 DbErrorKind::Syntax(e.message.clone()),
@@ -394,7 +456,7 @@ impl Transaction {
         })?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
-            results.push(self.execute(&statement)?);
+            results.push(self.execute_with_budget(&statement, budget)?);
         }
         Ok(results)
     }

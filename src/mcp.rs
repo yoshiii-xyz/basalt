@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::{Connection, Database};
 use crate::db::{Column, StatementResult};
+use crate::engine::MCP_EXECUTION_WORK_LIMIT;
 use crate::sql::ast::Statement;
 use crate::sql::parser::parse;
 use crate::types::{ColumnType, Value};
@@ -266,7 +267,7 @@ fn run_target(target: McpTarget, allow_writes: bool) -> Result<(), String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct SqlInput {
-    /// SQL to execute. The server accepts up to 1 MiB, 100 statements, and 32 mutating statements per call.
+    /// SQL to execute. The server accepts up to 1 MiB, 100 statements, 32 mutating statements, and a bounded execution budget per call.
     sql: String,
     /// Maximum rows returned for each SELECT result. Defaults to 100 and is capped at 1,000.
     #[serde(default)]
@@ -464,7 +465,7 @@ impl BasaltMcp {
     /// Read rows without allowing a query to mutate the database.
     #[tool(
         name = "query",
-        description = "Run read-only SQL. Accepts SELECT and EXPLAIN SELECT only. Use execute for writes, DDL, transactions, and CHECKPOINT. Results are typed, capped by max_rows, and limited to a 1 MiB response.",
+        description = "Run bounded read-only SQL. Accepts SELECT and EXPLAIN SELECT only. Use execute for writes, DDL, transactions, and CHECKPOINT. Results are typed, capped by max_rows, limited to a 1 MiB response, and protected by an execution work budget.",
         annotations(
             title = "Read from Basalt",
             read_only_hint = true,
@@ -496,7 +497,7 @@ impl BasaltMcp {
     /// Execute arbitrary SQL on the session connection.
     #[tool(
         name = "execute",
-        description = "Execute SQL against a configured direct Basalt database. This tool is unavailable in workspace mode. Use for INSERT, UPDATE, DELETE, CREATE/DROP, transactions, CHECKPOINT, and SELECT when needed. Statements run in order on one connection; use BEGIN and COMMIT for an explicit multi-call transaction. This tool can change or delete data.",
+        description = "Execute bounded SQL against a configured direct Basalt database. This tool is unavailable in workspace mode. Use for INSERT, UPDATE, DELETE, CREATE/DROP, transactions, CHECKPOINT, and SELECT when needed. Statements run in order on one connection; use BEGIN and COMMIT for an explicit multi-call transaction. This tool can change or delete data.",
         annotations(
             title = "Execute SQL",
             read_only_hint = false,
@@ -1025,7 +1026,7 @@ async fn execute_sql(
             .lock()
             .map_err(|_| "database connection lock poisoned".to_string())?;
         let results = connection
-            .execute_sql(&input.sql)
+            .execute_sql_with_budget(&input.sql, MCP_EXECUTION_WORK_LIMIT)
             .map_err(|error| format!("SQL execution failed: {error}"))?;
         let (results, rows_truncated) = convert_results(results, max_rows);
         let response = SqlResult {
@@ -1057,7 +1058,7 @@ async fn execute_workspace_sql(
             .database()
             .map_err(|error| format!("workspace database open failed: {error}"))?;
         let results = database
-            .execute_sql(&input.sql)
+            .execute_sql_with_budget(&input.sql, MCP_EXECUTION_WORK_LIMIT)
             .map_err(|error| format!("SQL execution failed: {error}"))?;
         let (results, rows_truncated) = convert_results(results, max_rows);
         let response = SqlResult {

@@ -252,7 +252,15 @@ applies a mutation against a changed base state.
 
 Workspace previews accept at most 64 statements and 32 mutating statements per
 call. This bounds the impact described by one plan; larger jobs should be
-split into separately reviewed plans.
+split into separately reviewed plans. SQL executed by `query`, direct-mode
+`execute`, `workspace_preview`, and `workspace_apply` also shares a
+1,000,000-unit engine work budget per request. The budget is enforced while
+the engine scans, joins, groups, projects, sorts, or prepares rows, before the
+full result is handed to MCP. It is a deterministic work bound, not a wall
+clock timeout or a byte-precise memory quota. If it is exceeded, the operation
+fails without committing a mutation; narrow the query, add a selective
+predicate or limit, split the write into reviewed plans, or use the CLI for a
+larger intentional job.
 
 Workspace exports count live rows before materializing them and reject tables
 over 10,000 rows or 1 MiB of raw content before the MCP response-size check.
@@ -296,7 +304,7 @@ Available tools:
 
 | Tool | Use | Mutates data |
 | --- | --- | --- |
-| `execute` | Writes, DDL, transactions, `CHECKPOINT`, and unrestricted SQL | Yes; requires approval |
+| `execute` | Writes, DDL, transactions, `CHECKPOINT`, and bounded SQL | Yes; requires approval |
 
 `query` and `execute` accept:
 
@@ -307,15 +315,18 @@ Available tools:
 }
 ```
 
-`max_rows` defaults to 100 and cannot exceed 1,000. The response includes
-statement results in order, the committed generation, transaction state,
+`max_rows` defaults to 100 and cannot exceed 1,000. It caps rows serialized in
+the response; it does not replace the engine work budget above. The response
+includes statement results in order, the committed generation, transaction state,
 execution time, and whether rows were truncated. Each scalar is explicit, for
 example `{ "type": "integer", "value": 1 }`, `{ "type": "real", "value": "1.5" }`,
 or `{ "type": "null" }`. Real values are strings so non-finite results cannot
 break JSON serialization and clients can choose their own numeric precision.
 Responses larger than 1 MiB are rejected with an actionable error; narrow the
 projection or lower `max_rows` when that happens. SQL input is limited to 1 MiB,
-100 statements, and 32 mutating statements per call.
+100 statements, and 32 mutating statements per call. A request that exceeds
+the engine work budget returns an error naming the operation that crossed the
+bound; no partial autocommit mutation is published.
 
 The `basalt://schema` resource contains the current committed table and column
 metadata as `application/json`. It is useful when an agent needs schema context
