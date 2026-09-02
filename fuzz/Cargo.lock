@@ -29,12 +29,15 @@ version = "0.1.1"
 dependencies = [
  "csv",
  "fs4",
+ "futures",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
