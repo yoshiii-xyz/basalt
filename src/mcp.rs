@@ -675,7 +675,7 @@ impl BasaltMcp {
         annotations(
             title = "Import workspace data",
             read_only_hint = false,
-            destructive_hint = true,
+            destructive_hint = false,
             idempotent_hint = false,
             open_world_hint = false
         )

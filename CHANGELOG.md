@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Corrected the MCP workspace import annotation to identify it as additive
+  rather than destructive, with a wire-level regression check.
 - Added versioned local workspaces with `basalt init`, read-only workspace
   queries, and JSON inspection.
 - Added atomic CSV, JSON/object, JSON Lines, and Basalt SQL dump imports plus

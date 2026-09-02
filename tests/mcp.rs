@@ -396,6 +396,18 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
     assert!(!tool_names.contains(&"execute"));
 
+    let workspace_import_tool = result(&tools)["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "workspace_import")
+        .expect("workspace_import should be listed");
+    assert_eq!(workspace_import_tool["annotations"]["readOnlyHint"], false);
+    assert_eq!(
+        workspace_import_tool["annotations"]["destructiveHint"],
+        false
+    );
+
     let inspect = read_only.request(
         3,
         "tools/call",

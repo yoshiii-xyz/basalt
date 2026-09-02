@@ -106,6 +106,33 @@ once:
 - a cheap undo path; and
 - an MCP and CLI surface that expose the same semantics.
 
+### Current upstream issue signal (rechecked 2026-09-01)
+
+These are open issue reports, not defect rates, security audits, or adoption
+metrics. They are useful evidence about the problems adjacent tools are being
+asked to solve:
+
+- AgentFS has an open request for whole-filesystem rollback, alongside current
+  reports involving a first-command timeout on Apple silicon and filesystem
+  corruption. That reinforces the boundary: Basalt should make structured-data
+  changes reversible without expanding into a filesystem overlay.
+- The official MCP servers repository has an open report that delete tools can
+  return success when nothing matched, and another that a stateful tool's
+  read-only and idempotent annotations are inaccurate. Basalt must report the
+  actual outcome of each operation, keep additive and destructive hints
+  accurate, and treat annotations as host hints rather than enforcement.
+- Turso has open reports about a short WAL read being treated as an empty log
+  and about `.dump` changing the stored type of a whole-number REAL. These do
+  not establish a general quality ranking, but they show why SQLite
+  compatibility and durability claims need their own test and release budget.
+
+The product inference is narrow and practical: Basalt's best switching moment
+is not “use a better database.” It is “give an agent a local data workspace
+whose proposed writes have truthful status, explicit approval, durable
+recovery, and a bounded undo path.” The current implementation covers that
+shape; external users still need to validate whether it is valuable enough to
+switch workflows.
+
 ## Basalt's current position
 
 The current repository already provides useful foundations:
@@ -349,6 +376,13 @@ Primary and current sources reviewed for this decision:
 - [MCP Registry publishing quickstart](https://modelcontextprotocol.io/registry/quickstart)
 - [MCP 2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
 - [MCP tool annotation guidance](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
+- [AgentFS rollback request](https://github.com/tursodatabase/agentfs/issues/313)
+- [AgentFS macOS first-exec timeout report](https://github.com/tursodatabase/agentfs/issues/342)
+- [AgentFS filesystem corruption report](https://github.com/tursodatabase/agentfs/issues/332)
+- [MCP servers inaccurate delete outcome report](https://github.com/modelcontextprotocol/servers/issues/4740)
+- [MCP servers inaccurate statefulness annotations report](https://github.com/modelcontextprotocol/servers/issues/4721)
+- [Turso WAL recovery report](https://github.com/tursodatabase/turso/issues/8593)
+- [Turso dump type round-trip report](https://github.com/tursodatabase/turso/issues/8577)
 - [MCP roots and filesystem boundaries](https://modelcontextprotocol.io/specification/2025-03-26/client/roots)
 - [redb](https://github.com/cberner/redb)
 - [fjall](https://github.com/fjall-rs/fjall)
