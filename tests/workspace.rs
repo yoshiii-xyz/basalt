@@ -342,6 +342,20 @@ fn previews_applies_diffs_and_undoes_one_change() {
     let apply: Value = serde_json::from_slice(&apply.stdout).unwrap();
     let change_id = apply["change_id"].as_str().unwrap();
 
+    let retried_apply = run(&[
+        "workspace",
+        "apply",
+        "--json",
+        path_arg(&workspace),
+        plan_id,
+    ]);
+    assert!(
+        retried_apply.status.success(),
+        "retrying apply failed: {retried_apply:?}"
+    );
+    let retried_apply: Value = serde_json::from_slice(&retried_apply.stdout).unwrap();
+    assert_eq!(retried_apply["change_id"], change_id);
+
     let query = run(&[
         "workspace",
         "query",
@@ -372,6 +386,23 @@ fn previews_applies_diffs_and_undoes_one_change() {
         change_id,
     ]);
     assert!(undo.status.success(), "undo failed: {undo:?}");
+    let undo: Value = serde_json::from_slice(&undo.stdout).unwrap();
+    assert_eq!(undo["undone_change_id"], change_id);
+
+    let retried_undo = run(&[
+        "workspace",
+        "undo",
+        "--json",
+        path_arg(&workspace),
+        change_id,
+    ]);
+    assert!(
+        retried_undo.status.success(),
+        "retrying undo failed: {retried_undo:?}"
+    );
+    let retried_undo: Value = serde_json::from_slice(&retried_undo.stdout).unwrap();
+    assert_eq!(retried_undo["undone_change_id"], change_id);
+
     let query = run(&[
         "workspace",
         "query",
@@ -466,6 +497,31 @@ fn stale_plans_and_non_latest_undo_are_rejected() {
         third_change,
     ]);
     assert!(latest_undo.status.success(), "undo failed: {latest_undo:?}");
+
+    let moved_preview = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Ada' WHERE id = 1",
+    ]);
+    let moved_preview: Value = serde_json::from_slice(&moved_preview.stdout).unwrap();
+    let moved_plan = moved_preview["plan_id"].as_str().unwrap();
+    let moved_apply = run(&[
+        "workspace",
+        "apply",
+        "--json",
+        path_arg(&workspace),
+        moved_plan,
+    ]);
+    assert!(moved_apply.status.success());
+
+    let replay = run(&["workspace", "apply", path_arg(&workspace), second_plan]);
+    assert!(!replay.status.success());
+    assert!(
+        String::from_utf8_lossy(&replay.stderr).contains("will not be replayed"),
+        "unexpected replay error: {replay:?}"
+    );
 }
 
 #[test]

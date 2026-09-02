@@ -408,6 +408,18 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         false
     );
 
+    for name in ["workspace_apply", "workspace_undo"] {
+        let tool = result(&tools)["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"));
+        assert_eq!(tool["annotations"]["readOnlyHint"], false);
+        assert_eq!(tool["annotations"]["destructiveHint"], true);
+        assert_eq!(tool["annotations"]["idempotentHint"], true);
+    }
+
     let inspect = read_only.request(
         3,
         "tools/call",
@@ -521,8 +533,22 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         .expect("apply should return a change ID")
         .to_owned();
 
-    let changed = writable.request(
+    let retried_apply = writable.request(
         7,
+        "tools/call",
+        json!({
+            "name": "workspace_apply",
+            "arguments": {"plan_id": plan_id}
+        }),
+    );
+    assert_ne!(result(&retried_apply)["isError"], true);
+    assert_eq!(
+        result(&retried_apply)["structuredContent"]["change_id"],
+        change_id
+    );
+
+    let changed = writable.request(
+        8,
         "tools/call",
         json!({
             "name": "query",
@@ -535,7 +561,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
 
     let history = writable.request(
-        8,
+        9,
         "tools/call",
         json!({"name": "workspace_history", "arguments": {}}),
     );
@@ -557,7 +583,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
 
     let diff = writable.request(
-        9,
+        10,
         "tools/call",
         json!({
             "name": "workspace_diff",
@@ -571,7 +597,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert_eq!(result(&diff)["structuredContent"]["state_changed"], true);
 
     let undo = writable.request(
-        10,
+        11,
         "tools/call",
         json!({
             "name": "workspace_undo",
@@ -583,8 +609,22 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         change_id
     );
 
+    let retried_undo = writable.request(
+        12,
+        "tools/call",
+        json!({
+            "name": "workspace_undo",
+            "arguments": {"change_id": change_id}
+        }),
+    );
+    assert_ne!(result(&retried_undo)["isError"], true);
+    assert_eq!(
+        result(&retried_undo)["structuredContent"]["undone_change_id"],
+        change_id
+    );
+
     let restored = writable.request(
-        11,
+        13,
         "tools/call",
         json!({
             "name": "query",
@@ -597,7 +637,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
 
     let exported = writable.request(
-        12,
+        14,
         "tools/call",
         json!({
             "name": "workspace_export",

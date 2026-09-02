@@ -195,6 +195,13 @@ provide a multi-call SQL transaction; the durable plan and recovery lifecycle
 is the transaction boundary. `workspace_apply` rejects stale plans and never
 silently applies a mutation against a changed base state.
 
+The apply and undo calls are retry-safe for lost responses. Their identifiers
+are deterministic: an exact retry returns the original receipt when the
+workspace is still at the recorded post-operation state. If later work moved
+the workspace, Basalt rejects the retry rather than replaying or discarding
+that work. Tool annotations remain hints; the state and identifier checks are
+the enforcement boundary.
+
 `workspace_import` is an explicit atomic ingress operation rather than a raw
 SQL escape hatch. It requires `--allow-writes`, creates a new table, and stores
 the pre-import recovery point in workspace history. Use `workspace_undo` to

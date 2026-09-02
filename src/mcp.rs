@@ -747,7 +747,7 @@ impl BasaltMcp {
             title = "Apply workspace plan",
             read_only_hint = false,
             destructive_hint = true,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]
@@ -832,7 +832,7 @@ impl BasaltMcp {
             title = "Undo workspace change",
             read_only_hint = false,
             destructive_hint = true,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]

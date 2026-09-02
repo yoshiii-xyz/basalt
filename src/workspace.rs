@@ -1817,11 +1817,6 @@ fn apply_plan(
     let database = workspace.database()?;
     database.checkpoint()?;
     let current_state = state_fingerprint(&workspace.database_path())?;
-    if current_state != plan.base_state {
-        return Err(WorkspaceError::Invalid(
-            "plan is stale; preview the operation again against the current workspace".to_string(),
-        ));
-    }
     let change_id = apply_change_id(&plan.plan_id, &plan.base_state);
     let change_file = change_path(workspace, &change_id);
     let mut changes = load_changes(workspace)?;
@@ -1833,8 +1828,25 @@ fn apply_plan(
             write_atomic_json(&change_file, existing)?;
         }
         if existing.status.is_committed() {
+            if existing.after_state.as_deref() == Some(current_state.as_str()) {
+                return Ok(ApplyReport {
+                    change_id,
+                    plan_id: plan.plan_id,
+                    base_state: existing.base_state.clone(),
+                    after_state: existing.after_state.clone().ok_or_else(|| {
+                        WorkspaceError::Invalid(
+                            "committed plan is missing its after-state".to_string(),
+                        )
+                    })?,
+                    generation: existing.committed_generation.ok_or_else(|| {
+                        WorkspaceError::Invalid(
+                            "committed plan is missing its generation".to_string(),
+                        )
+                    })?,
+                });
+            }
             return Err(WorkspaceError::Invalid(format!(
-                "plan has already been applied as change {change_id}"
+                "plan has already been applied as change {change_id}; workspace state moved, so it will not be replayed"
             )));
         }
         if existing.status == ChangeStatus::Unresolved {
@@ -1842,6 +1854,11 @@ fn apply_plan(
                 "change {change_id} is unresolved; inspect its recovery point before continuing"
             )));
         }
+    }
+    if current_state != plan.base_state {
+        return Err(WorkspaceError::Invalid(
+            "plan is stale; preview the operation again against the current workspace".to_string(),
+        ));
     }
     let snapshot = snapshot_path(workspace, &change_id);
     if snapshot.exists() {
@@ -2028,6 +2045,30 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
     reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
+    if let Some(existing) = changes.iter().find(|change| {
+        change.kind == ChangeKind::Undo
+            && change.target_change_id.as_deref() == Some(requested_change_id)
+            && change.status.is_committed()
+    }) {
+        if existing.after_state.as_deref() == Some(current_state.as_str()) {
+            return Ok(UndoReport {
+                change_id: existing.change_id.clone(),
+                undone_change_id: requested_change_id.to_string(),
+                restored_state: existing.after_state.clone().ok_or_else(|| {
+                    WorkspaceError::Invalid(
+                        "committed undo is missing its restored state".to_string(),
+                    )
+                })?,
+                generation: existing.committed_generation.ok_or_else(|| {
+                    WorkspaceError::Invalid("committed undo is missing its generation".to_string())
+                })?,
+            });
+        }
+        return Err(WorkspaceError::Invalid(format!(
+            "change {requested_change_id} has already been undone as {}; workspace state moved, so it will not be replayed",
+            existing.change_id
+        )));
+    }
     let target = changes
         .iter()
         .find(|change| change.change_id == requested_change_id)
