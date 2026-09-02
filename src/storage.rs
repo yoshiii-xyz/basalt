@@ -5,9 +5,11 @@
 //! This keeps the file format inspectable and lets recovery distinguish a
 //! complete snapshot from a torn write without relying on external crates.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::crc::crc32;
 use crate::db::{DbError, DbErrorKind, State};
@@ -19,6 +21,12 @@ const FILE_MAGIC: &[u8; 8] = b"BASALTDB";
 const FILE_VERSION: u32 = 1;
 const FILE_HEADER: usize = 64;
 const PAGE_HEADER: usize = 24;
+/// Maximum state payload that can fit in a valid snapshot of the configured
+/// maximum size.
+pub const MAX_SNAPSHOT_PAYLOAD_BYTES: usize =
+    ((MAX_SNAPSHOT_BYTES - FILE_HEADER) / PAGE_SIZE) * (PAGE_SIZE - PAGE_HEADER);
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn io_error(context: &str, e: io::Error) -> DbError {
     DbError::new(
@@ -30,6 +38,9 @@ fn io_error(context: &str, e: io::Error) -> DbError {
 /// Write a complete database snapshot atomically.
 pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(), DbError> {
     let payload = state.encode();
+    if payload.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(limit("database state is too large for a snapshot"));
+    }
     let page_payload = PAGE_SIZE - PAGE_HEADER;
     let page_count = payload.len().div_ceil(page_payload).max(1);
     let file_len = FILE_HEADER
@@ -65,9 +76,8 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
         bytes[offset + PAGE_HEADER..offset + PAGE_HEADER + chunk.len()].copy_from_slice(chunk);
     }
 
-    let mut tmp_os = path.as_os_str().to_os_string();
-    tmp_os.push(".tmp");
-    let tmp = Path::new(&tmp_os);
+    ensure_not_symlink(path, "database snapshot")?;
+    let tmp = temporary_path(path);
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -75,16 +85,16 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
         fs::create_dir_all(parent).map_err(|e| io_error("create database directory", e))?;
     }
     let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
-        .open(tmp)
+        .open(&tmp)
         .map_err(|e| io_error("open snapshot temporary file", e))?;
     file.write_all(&bytes)
         .map_err(|e| io_error("write snapshot", e))?;
     file.sync_all().map_err(|e| io_error("sync snapshot", e))?;
     drop(file);
-    let install_result = install_snapshot(tmp, path);
+    ensure_not_symlink(path, "database snapshot")?;
+    let install_result = install_snapshot(&tmp, path);
     if install_result.is_err() {
         let _ = fs::remove_file(tmp);
     }
@@ -114,12 +124,20 @@ fn install_snapshot(tmp: &Path, path: &Path) -> Result<(), DbError> {
 
 /// Read a snapshot.  A missing file is treated as an empty database.
 pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
-    if !path.exists() {
-        return Ok((State::empty(), 0));
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((State::empty(), 0));
+        }
+        Err(error) => return Err(io_error("inspect database", error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(path_error("database snapshot cannot be a symbolic link"));
     }
-    let file_len = fs::metadata(path)
-        .map_err(|e| io_error("inspect database", e))?
-        .len();
+    if !metadata.is_file() {
+        return Err(path_error("database snapshot is not a regular file"));
+    }
+    let file_len = metadata.len();
     if file_len > MAX_SNAPSHOT_BYTES as u64 {
         return Err(corrupt("database snapshot is too large"));
     }
@@ -132,6 +150,45 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
         return Err(corrupt("database snapshot is too large"));
     }
     read_snapshot_bytes(&bytes)
+}
+
+/// Read only the generation from a snapshot header. This lets database
+/// recovery decide whether a WAL frame is newer than a damaged snapshot
+/// without decoding the entire file.
+pub(crate) fn read_snapshot_generation(path: &Path) -> Result<Option<u64>, DbError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("inspect database", error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(path_error("database snapshot cannot be a symbolic link"));
+    }
+    if !metadata.is_file() {
+        return Err(path_error("database snapshot is not a regular file"));
+    }
+    if metadata.len() < FILE_HEADER as u64 {
+        return Err(corrupt("database header is truncated"));
+    }
+    let mut header = [0u8; FILE_HEADER];
+    File::open(path)
+        .map_err(|e| io_error("open database", e))?
+        .read_exact(&mut header)
+        .map_err(|e| io_error("read database header", e))?;
+    if &header[..8] != FILE_MAGIC {
+        return Err(corrupt("invalid database magic"));
+    }
+    if u32_at(&header, 8)? != FILE_VERSION {
+        return Err(corrupt("unsupported database version"));
+    }
+    if u32_at(&header, 12)? as usize != PAGE_SIZE {
+        return Err(corrupt("unsupported database page size"));
+    }
+    let header_crc = u32_at(&header, 40)?;
+    if crc32(&header[..40]) != header_crc {
+        return Err(corrupt("database header checksum mismatch"));
+    }
+    Ok(Some(u64_at(&header, 16)?))
 }
 
 /// Validate and decode snapshot bytes without touching the filesystem.
@@ -163,7 +220,11 @@ pub fn read_snapshot_bytes(bytes: &[u8]) -> Result<(State, u64), DbError> {
         .map_err(|_| corrupt("database payload is too large"))?;
     let page_count = usize::try_from(u64_at(bytes, 32)?)
         .map_err(|_| corrupt("database page count is too large"))?;
-    if page_count == 0 || payload_len > page_count.saturating_mul(PAGE_SIZE - PAGE_HEADER) {
+    if page_count == 0
+        || page_count > (MAX_SNAPSHOT_BYTES - FILE_HEADER) / PAGE_SIZE
+        || payload_len > MAX_SNAPSHOT_PAYLOAD_BYTES
+        || payload_len > page_count.saturating_mul(PAGE_SIZE - PAGE_HEADER)
+    {
         return Err(corrupt("invalid database payload size"));
     }
     let expected = FILE_HEADER
@@ -205,15 +266,54 @@ pub fn read_snapshot_bytes(bytes: &[u8]) -> Result<(State, u64), DbError> {
     Ok((state, generation))
 }
 
+#[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<(), DbError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        && let Ok(dir) = File::open(parent)
     {
-        let _ = dir.sync_all();
+        let dir = File::open(parent).map_err(|e| io_error("open database directory", e))?;
+        dir.sync_all()
+            .map_err(|e| io_error("sync database directory", e))?;
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<(), DbError> {
+    Ok(())
+}
+
+fn ensure_not_symlink(path: &Path, label: &str) -> Result<(), DbError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(path_error(&format!("{label} cannot be a symbolic link")))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(&format!("inspect {label}"), error)),
+    }
+}
+
+fn temporary_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_else(|| OsString::from("database"));
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    name.push(format!(
+        ".basalt-snapshot-tmp-{}-{counter}",
+        std::process::id()
+    ));
+    path.with_file_name(name)
+}
+
+fn path_error(message: &str) -> DbError {
+    DbError::new(DbErrorKind::Io(message.to_string()), message)
+}
+
+fn limit(message: &str) -> DbError {
+    DbError::new(DbErrorKind::Limit, message)
 }
 
 fn corrupt(message: &str) -> DbError {
@@ -318,6 +418,28 @@ mod tests {
         bytes[FILE_HEADER + PAGE_HEADER] ^= 1;
         fs::write(&path, bytes).unwrap();
         assert!(read_snapshot(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symbolic_link_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let dir =
+            std::env::temp_dir().join(format!("basalt-storage-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("outside.db");
+        let path = dir.join("db");
+        write_snapshot(&target, &State::empty(), 0).unwrap();
+        symlink(&target, &path).unwrap();
+
+        let read_error = read_snapshot(&path).unwrap_err();
+        let write_error = write_snapshot(&path, &State::empty(), 1).unwrap_err();
+
+        assert!(read_error.message.contains("symbolic link"));
+        assert!(write_error.message.contains("symbolic link"));
         let _ = fs::remove_dir_all(dir);
     }
 }

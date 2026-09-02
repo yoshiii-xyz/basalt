@@ -39,6 +39,17 @@ exponents. The minimum `INTEGER` literal is written as
 
 ## Transactions and durability
 
+Durable snapshots are capped at 256 MiB of on-disk data. The write-ahead log
+is capped at 1 GiB; writes return a checkpoint-required limit error before the
+log can grow further. Basalt refuses symbolic links for durable database,
+snapshot, WAL, and lock paths.
+
+If a snapshot is damaged, WAL recovery is used only when its generation is
+provably newer than the snapshot header. An older or same-generation WAL is
+rejected rather than risking a silent rollback. Export a workspace or
+checkpoint it before moving or backing up its files, and stop the owning
+process first.
+
 `Database::in_memory()` is ephemeral. `Database::open(path)` stores committed
 state in a checksummed snapshot and appends each committed generation to
 `path.wal`. `checkpoint()` writes a fresh snapshot and clears old WAL frames.

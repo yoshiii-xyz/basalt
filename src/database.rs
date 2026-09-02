@@ -64,6 +64,7 @@ impl Database {
         workspace_lock_already_held: bool,
     ) -> Result<Database, DbError> {
         let path = path.as_ref().to_path_buf();
+        reject_symlink(&path, "database path")?;
         let workspace_lock_file = if workspace_lock_already_held {
             None
         } else {
@@ -79,6 +80,18 @@ impl Database {
                 let Some(frame) = &frame else {
                     return Err(error);
                 };
+                let snapshot_generation = storage::read_snapshot_generation(&path)?;
+                if let Some(snapshot_generation) = snapshot_generation
+                    && frame.generation <= snapshot_generation
+                {
+                    return Err(dberr(
+                        DbErrorKind::Io("WAL is not newer than the damaged snapshot".into()),
+                        format!(
+                            "corrupt database snapshot cannot be safely recovered: WAL generation {} is not newer than snapshot generation {}",
+                            frame.generation, snapshot_generation
+                        ),
+                    ));
+                }
                 (State::decode(&frame.payload)?, frame.generation, true)
             }
         };
@@ -92,6 +105,15 @@ impl Database {
                 wal::truncate(&wal_path)?;
                 repair_snapshot = false;
             } else {
+                if frame.generation == generation {
+                    let wal_state = State::decode(&frame.payload)?;
+                    if wal_state.encode() != state.encode() {
+                        return Err(dberr(
+                            DbErrorKind::Io("same-generation WAL and snapshot differ".into()),
+                            "corrupt database: same-generation WAL and snapshot differ",
+                        ));
+                    }
+                }
                 // The snapshot is at least as new as every WAL frame; a
                 // previous checkpoint may have been interrupted after the
                 // snapshot install and left stale frames behind.
@@ -542,6 +564,7 @@ fn acquire_lock(path: &Path) -> Result<File, DbError> {
     let mut lock_os = path.as_os_str().to_os_string();
     lock_os.push(".lock");
     let lock_path = PathBuf::from(lock_os);
+    reject_symlink(&lock_path, "database lock")?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -563,6 +586,21 @@ fn acquire_lock(path: &Path) -> Result<File, DbError> {
         Err(fs4::TryLockError::Error(error)) => Err(dberr(
             DbErrorKind::Io(format!("lock database: {error}")),
             format!("lock database: {error}"),
+        )),
+    }
+}
+
+fn reject_symlink(path: &Path, label: &str) -> Result<(), DbError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(dberr(
+            DbErrorKind::Io(format!("{label} cannot be a symbolic link")),
+            format!("{label} cannot be a symbolic link"),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(dberr(
+            DbErrorKind::Io(format!("inspect {label}: {error}")),
+            format!("inspect {label}: {error}"),
         )),
     }
 }
@@ -782,11 +820,110 @@ mod tests {
                 .unwrap();
         }
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[0] ^= 0xff;
+        bytes[64 + 24] ^= 0xff;
         std::fs::write(&path, bytes).unwrap();
         let database = Database::open(&path).unwrap();
         let result = database.execute_sql("SELECT * FROM t").unwrap();
         assert!(matches!(&result[0], StatementResult::Select { rows, .. } if rows.len() == 1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refuses_to_recover_a_damaged_snapshot_from_an_older_wal() {
+        let dir =
+            std::env::temp_dir().join(format!("basalt-stale-wal-recovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.db");
+        {
+            let database = Database::open(&path).unwrap();
+            database
+                .execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            database.checkpoint().unwrap();
+        }
+        let empty_payload = State::empty().encode();
+        wal::append(&wal_path(&path), 1, &empty_payload).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[64 + 24] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = match Database::open(&path) {
+            Ok(_) => panic!("damaged snapshot should not recover from an older WAL"),
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("cannot be safely recovered"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_same_generation_wal_that_differs_from_the_snapshot() {
+        let dir =
+            std::env::temp_dir().join(format!("basalt-same-generation-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.db");
+        {
+            let database = Database::open(&path).unwrap();
+            database
+                .execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            database.checkpoint().unwrap();
+        }
+        wal::append(&wal_path(&path), 1, &State::empty().encode()).unwrap();
+
+        let error = match Database::open(&path) {
+            Ok(_) => panic!("same-generation WAL mismatch should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .message
+                .contains("same-generation WAL and snapshot differ")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symbolic_link_database_and_lock_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir =
+            std::env::temp_dir().join(format!("basalt-database-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target = dir.join("target.db");
+        let linked = dir.join("linked.db");
+        drop(Database::open(&target).unwrap());
+        symlink(&target, &linked).unwrap();
+        let path_error = match Database::open(&linked) {
+            Ok(_) => panic!("symbolic-link database paths should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            path_error
+                .message
+                .contains("database path cannot be a symbolic link")
+        );
+
+        let lock_target = dir.join("lock-target");
+        let lock_path = dir.join("locked.db.lock");
+        std::fs::write(&lock_target, b"").unwrap();
+        symlink(&lock_target, &lock_path).unwrap();
+        let lock_error = match Database::open(dir.join("locked.db")) {
+            Ok(_) => panic!("symbolic-link lock paths should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            lock_error
+                .message
+                .contains("database lock cannot be a symbolic link")
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

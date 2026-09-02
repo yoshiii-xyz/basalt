@@ -11,10 +11,14 @@ use std::path::Path;
 
 use crate::crc::crc32;
 use crate::db::{DbError, DbErrorKind};
+use crate::storage;
 
 const MAGIC: &[u8; 4] = b"BSWL";
 const VERSION: u32 = 1;
 const HEADER: usize = 32;
+/// Maximum total WAL size before callers must checkpoint.
+pub const MAX_WAL_BYTES: u64 = (storage::MAX_SNAPSHOT_BYTES as u64) * 4;
+const MAX_PAYLOAD_BYTES: usize = storage::MAX_SNAPSHOT_PAYLOAD_BYTES;
 
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -30,6 +34,14 @@ fn io_error(context: &str, e: io::Error) -> DbError {
 }
 
 pub fn append(path: &Path, generation: u64, payload: &[u8]) -> Result<(), DbError> {
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(limit("database state is too large for the WAL"));
+    }
+    let frame_len = HEADER
+        .checked_add(payload.len())
+        .ok_or_else(|| limit("WAL frame is too large"))?;
+    let existing_len = existing_file_len(path)?.unwrap_or(0);
+    ensure_wal_size(existing_len, frame_len as u64)?;
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -47,57 +59,80 @@ pub fn append(path: &Path, generation: u64, payload: &[u8]) -> Result<(), DbErro
         .append(true)
         .open(path)
         .map_err(|e| io_error("open WAL", e))?;
+    let actual_len = file
+        .metadata()
+        .map_err(|e| io_error("inspect WAL", e))?
+        .len();
+    ensure_wal_size(actual_len, frame_len as u64)?;
     file.write_all(&header)
         .map_err(|e| io_error("write WAL header", e))?;
     file.write_all(payload)
         .map_err(|e| io_error("write WAL payload", e))?;
-    file.sync_all().map_err(|e| io_error("sync WAL", e))
+    file.sync_all().map_err(|e| io_error("sync WAL", e))?;
+    sync_parent(path)
 }
 
 /// Return the highest valid frame.  A partial/corrupt tail is ignored; an
 /// invalid frame before the tail is an error because it would hide later data.
 pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
-    if !path.exists() {
+    let Some(file_len) = existing_file_len(path)? else {
         return Ok(None);
+    };
+    if file_len > MAX_WAL_BYTES {
+        return Err(limit(
+            "WAL is too large; checkpoint the database before retrying",
+        ));
     }
-    let mut bytes = Vec::new();
-    File::open(path)
-        .map_err(|e| io_error("open WAL", e))?
-        .read_to_end(&mut bytes)
-        .map_err(|e| io_error("read WAL", e))?;
-    let mut offset = 0usize;
+    let mut file = File::open(path).map_err(|e| io_error("open WAL", e))?;
+    let mut offset = 0u64;
     let mut latest = None;
-    while offset < bytes.len() {
-        if bytes.len() - offset < HEADER {
+    loop {
+        let mut header = [0u8; HEADER];
+        let header_len =
+            read_prefix(&mut file, &mut header).map_err(|e| io_error("read WAL header", e))?;
+        if header_len == 0 {
+            break;
+        }
+        if header_len < HEADER {
             truncate_to(path, offset)?;
             break;
         }
-        if &bytes[offset..offset + 4] != MAGIC {
+        if &header[..4] != MAGIC {
             return Err(corrupt("invalid WAL magic"));
         }
-        let version = u32_at(&bytes, offset + 4)?;
+        let version = u32_at(&header, 4)?;
         if version != VERSION {
             return Err(corrupt("unsupported WAL version"));
         }
-        let generation = u64_at(&bytes, offset + 8)?;
-        let declared_len = u64_at(&bytes, offset + 16)?;
+        let generation = u64_at(&header, 8)?;
+        let declared_len = u64_at(&header, 16)?;
+        if declared_len > MAX_PAYLOAD_BYTES as u64 {
+            return Err(limit("WAL frame payload is too large"));
+        }
         let len = match usize::try_from(declared_len) {
             Ok(len) => len,
-            Err(_) => {
+            Err(_) => return Err(limit("WAL frame payload is too large")),
+        };
+        let frame_len = (HEADER as u64)
+            .checked_add(declared_len)
+            .ok_or_else(|| limit("WAL frame is too large"))?;
+        let end = offset
+            .checked_add(frame_len)
+            .ok_or_else(|| limit("WAL offset is too large"))?;
+        if end > file_len {
+            truncate_to(path, offset)?;
+            break;
+        }
+        let mut payload = vec![0u8; len];
+        if let Err(error) = file.read_exact(&mut payload) {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
                 truncate_to(path, offset)?;
                 break;
             }
-        };
-        let checksum = u32_at(&bytes, offset + 24)?;
-        let end = match offset.checked_add(HEADER).and_then(|n| n.checked_add(len)) {
-            Some(end) if end <= bytes.len() => end,
-            _ => {
-                truncate_to(path, offset)?;
-                break;
-            }
-        };
-        let payload = &bytes[offset + HEADER..end];
-        if crc32(payload) != checksum {
+            return Err(io_error("read WAL payload", error));
+        }
+        let checksum = u32_at(&header, 24)?;
+        if crc32(&payload) != checksum {
             return Err(corrupt("WAL frame checksum mismatch"));
         }
         if latest
@@ -107,7 +142,7 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
         {
             latest = Some(Frame {
                 generation,
-                payload: payload.to_vec(),
+                payload,
             });
         }
         offset = end;
@@ -116,7 +151,7 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
 }
 
 pub fn truncate(path: &Path) -> Result<(), DbError> {
-    if !path.exists() {
+    if existing_file_len(path)?.is_none() {
         return Ok(());
     }
     let file = OpenOptions::new()
@@ -125,18 +160,20 @@ pub fn truncate(path: &Path) -> Result<(), DbError> {
         .open(path)
         .map_err(|e| io_error("truncate WAL", e))?;
     file.sync_all()
-        .map_err(|e| io_error("sync truncated WAL", e))
+        .map_err(|e| io_error("sync truncated WAL", e))?;
+    sync_parent(path)
 }
 
-fn truncate_to(path: &Path, length: usize) -> Result<(), DbError> {
+fn truncate_to(path: &Path, length: u64) -> Result<(), DbError> {
     let file = OpenOptions::new()
         .write(true)
         .open(path)
         .map_err(|e| io_error("open WAL for tail repair", e))?;
-    file.set_len(length as u64)
+    file.set_len(length)
         .map_err(|e| io_error("truncate incomplete WAL frame", e))?;
     file.sync_all()
-        .map_err(|e| io_error("sync repaired WAL", e))
+        .map_err(|e| io_error("sync repaired WAL", e))?;
+    sync_parent(path)
 }
 
 fn corrupt(message: &str) -> DbError {
@@ -144,6 +181,71 @@ fn corrupt(message: &str) -> DbError {
         DbErrorKind::Io(message.to_string()),
         format!("corrupt WAL: {message}"),
     )
+}
+
+fn limit(message: &str) -> DbError {
+    DbError::new(DbErrorKind::Limit, message)
+}
+
+fn existing_file_len(path: &Path) -> Result<Option<u64>, DbError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("inspect WAL", error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(path_error("WAL cannot be a symbolic link"));
+    }
+    if !metadata.is_file() {
+        return Err(path_error("WAL is not a regular file"));
+    }
+    Ok(Some(metadata.len()))
+}
+
+fn ensure_wal_size(existing_len: u64, additional_len: u64) -> Result<(), DbError> {
+    let total = existing_len
+        .checked_add(additional_len)
+        .ok_or_else(|| limit("WAL is too large; checkpoint the database before retrying"))?;
+    if total > MAX_WAL_BYTES {
+        return Err(limit(
+            "WAL is full; checkpoint the database before retrying the write",
+        ));
+    }
+    Ok(())
+}
+
+fn read_prefix(file: &mut File, bytes: &mut [u8]) -> io::Result<usize> {
+    let mut read = 0;
+    while read < bytes.len() {
+        let count = file.read(&mut bytes[read..])?;
+        if count == 0 {
+            break;
+        }
+        read += count;
+    }
+    Ok(read)
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<(), DbError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let dir = File::open(parent).map_err(|e| io_error("open WAL directory", e))?;
+        dir.sync_all()
+            .map_err(|e| io_error("sync WAL directory", e))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<(), DbError> {
+    Ok(())
+}
+
+fn path_error(message: &str) -> DbError {
+    DbError::new(DbErrorKind::Io(message.to_string()), message)
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, DbError> {
@@ -213,6 +315,71 @@ mod tests {
         let frame = latest(&path).unwrap().unwrap();
         assert_eq!(frame.generation, 2);
         assert_eq!(frame.payload, b"two");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_an_oversized_frame_before_allocating_its_payload() {
+        let dir = std::env::temp_dir().join(format!("basalt-wal-limit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        let mut header = [0u8; HEADER];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..24].copy_from_slice(&(MAX_PAYLOAD_BYTES as u64 + 1).to_le_bytes());
+        fs::write(&path, header).unwrap();
+
+        let error = latest(&path).unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        assert!(error.message.contains("payload is too large"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_wal_file_above_the_total_limit() {
+        let dir =
+            std::env::temp_dir().join(format!("basalt-wal-total-limit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(MAX_WAL_BYTES + 1).unwrap();
+        drop(file);
+
+        let error = latest(&path).unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        assert!(error.message.contains("WAL is too large"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symbolic_link_wal() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("basalt-wal-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("outside.wal");
+        let path = dir.join("db.wal");
+        fs::write(&target, b"").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let error = latest(&path).unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            DbErrorKind::Io("WAL cannot be a symbolic link".into())
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

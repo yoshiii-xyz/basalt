@@ -176,3 +176,12 @@ An MCP host can create a new workspace on first start by passing
 `--init-workspace` with `--workspace PATH`. This initializes only a missing
 path; existing directories are opened normally and invalid manifests are not
 replaced.
+
+Workspace durability follows the database limits: the canonical snapshot is
+limited to 256 MiB and the WAL is limited to 1 GiB. Direct database writes
+must be checkpointed before the WAL limit is reached. Workspace-managed
+database, WAL, snapshot, and lock paths reject symbolic links. If a snapshot
+is damaged, Basalt will use WAL recovery only when the WAL generation is
+provably newer; an older or same-generation WAL is rejected to prevent a
+silent rollback. Stop the owning process before copying, restoring, or
+deleting workspace files.

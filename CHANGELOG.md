@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bounded WAL frame and file handling so recovery never reads an unbounded log
+  into memory, and writes fail clearly when checkpointing is required.
+- Hardened durable paths against symbolic-link sidecars and made snapshot
+  replacement use unique temporary files with directory synchronization.
+- Refused to recover a damaged snapshot from an older or same-generation WAL,
+  preventing silent rollback when the recovery source cannot be proven newer.
+
 ## 0.1.1 — 2026-09-02
 
 - Added checked-in MCP Registry metadata and a release check that keeps its
