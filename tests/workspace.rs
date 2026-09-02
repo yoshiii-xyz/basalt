@@ -154,6 +154,68 @@ fn imports_csv_exports_common_formats_and_reopens() {
 }
 
 #[test]
+fn machine_readable_import_and_export_reports_are_unambiguous() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("events.csv");
+    let export_path = temp.path().join("events.jsonl");
+    let source_bytes = b"id,name\n1,Ada\n";
+    fs::write(&source, source_bytes).unwrap();
+    assert!(run(&["init", path_arg(&workspace)]).status.success());
+
+    let imported = run(&[
+        "workspace",
+        "import",
+        "--json",
+        "--table",
+        "events",
+        path_arg(&workspace),
+        path_arg(&source),
+    ]);
+    assert!(imported.status.success(), "import failed: {imported:?}");
+    let imported: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert_eq!(imported["operation"], "import");
+    assert_eq!(imported["format"], "csv");
+    assert_eq!(imported["table"], "events");
+    assert_eq!(imported["bytes"], source_bytes.len());
+    assert_eq!(imported["summary"], "table events (1 rows, 2 columns)");
+
+    let exported = run(&[
+        "workspace",
+        "export",
+        "--json",
+        "--format",
+        "jsonl",
+        path_arg(&workspace),
+        "events",
+        path_arg(&export_path),
+    ]);
+    assert!(exported.status.success(), "export failed: {exported:?}");
+    let exported: Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert_eq!(exported["operation"], "export");
+    assert_eq!(exported["format"], "jsonl");
+    assert_eq!(exported["table"], "events");
+    assert_eq!(exported["rows"], 1);
+    assert_eq!(exported["bytes"], fs::metadata(&export_path).unwrap().len());
+
+    let ambiguous = run(&[
+        "workspace",
+        "export",
+        "--json",
+        "--format",
+        "jsonl",
+        path_arg(&workspace),
+        "events",
+        "-",
+    ]);
+    assert!(!ambiguous.status.success());
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr)
+            .contains("--json cannot be combined with stdout export")
+    );
+}
+
+#[test]
 fn json_import_and_sql_roundtrip_are_deterministic() {
     let temp = TempDir::new();
     let workspace = temp.path().join("json-workspace");

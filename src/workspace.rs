@@ -41,8 +41,8 @@ const SNAPSHOTS_DIR: &str = "snapshots";
 pub const HELP: &str = "Basalt workspace — local, portable SQL workspaces\n\n\
 Usage:\n  basalt workspace <COMMAND> [OPTIONS]\n\n\
 Commands:\n  init PATH                         Create a workspace\n  inspect [--json] PATH             Show workspace metadata and schema\n  query [OPTIONS] PATH SQL          Run a read-only query\n  preview [--json] PATH SQL         Preview a write and save its plan\n  apply [--json] PATH PLAN_ID       Apply one exact preview plan\n  history [--json] PATH             List applied and recoverable changes\n  diff [--json] PATH [CHANGE_ID]    Compare a change recovery point\n  undo [--json] PATH CHANGE_ID      Undo the latest change safely\n  import [OPTIONS] WORKSPACE SOURCE Import CSV, JSON, JSONL, or SQL\n  export [OPTIONS] WORKSPACE TABLE OUTPUT\n                                     Export CSV, JSONL, or SQL\n\n\
-Import options:\n  --table NAME                      Table name (required for stdin)\n  --format csv|json|jsonl|sql       Override format inference\n\n\
-Export options:\n  --format csv|jsonl|sql             Override format inference\n\n\
+Import options:\n  --table NAME                      Table name (required for stdin)\n  --format csv|json|jsonl|sql       Override format inference\n  --json                            Emit a machine-readable import report\n\n\
+Export options:\n  --format csv|jsonl|sql             Override format inference\n  --json                            Emit a machine-readable export report\n\n\
 Query options:\n  --output table|csv|json             Result format (table by default)\n\n\
 State options:\n  --json                             Emit machine-readable JSON\n\n\
 SOURCE and OUTPUT may be '-' for stdin/stdout. File extensions infer formats.\n\
@@ -328,12 +328,14 @@ enum Command {
         source: PathBuf,
         table: Option<String>,
         format: Option<DataFormat>,
+        json: bool,
     },
     Export {
         workspace: PathBuf,
         table: String,
         output: PathBuf,
         format: Option<DataFormat>,
+        json: bool,
     },
 }
 
@@ -468,6 +470,7 @@ pub fn run<R: Read, W: Write>(
             source,
             table,
             format,
+            json,
         } => {
             let workspace = Workspace::open(workspace)?;
             let format = format
@@ -500,20 +503,35 @@ pub fn run<R: Read, W: Write>(
                     import_sql(&database, &bytes)?
                 }
             };
-            writeln!(
-                output,
-                "imported {}{}",
-                format.name(),
-                imported
-                    .map(|summary| format!(": {summary}"))
-                    .unwrap_or_default()
-            )?;
+            if json {
+                let report = CliImportReport {
+                    operation: "import",
+                    workspace: workspace.root.display().to_string(),
+                    source: source.display().to_string(),
+                    format: format.name().to_string(),
+                    table: table_name,
+                    bytes: bytes.len(),
+                    summary: imported,
+                };
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                writeln!(
+                    output,
+                    "imported {}{}",
+                    format.name(),
+                    imported
+                        .map(|summary| format!(": {summary}"))
+                        .unwrap_or_default()
+                )?;
+            }
         }
         Command::Export {
             workspace,
             table,
             output: destination,
             format,
+            json,
         } => {
             let workspace = Workspace::open(workspace)?;
             let format = format
@@ -529,6 +547,12 @@ pub fn run<R: Read, W: Write>(
                     "JSON export is JSON Lines; use --format jsonl or a .jsonl file".to_string(),
                 ));
             }
+            if json && destination.as_os_str() == OsStr::new("-") {
+                return Err(WorkspaceError::Usage(
+                    "--json cannot be combined with stdout export; write the export to a file"
+                        .to_string(),
+                ));
+            }
             let database = workspace.database()?;
             let (columns, rows) = select_table(&database, &table)?;
             let bytes = match format {
@@ -538,7 +562,19 @@ pub fn run<R: Read, W: Write>(
                 DataFormat::Json => unreachable!(),
             };
             write_output(&workspace, &destination, &bytes, output)?;
-            if destination.as_os_str() == OsStr::new("-") {
+            if json {
+                let report = CliExportReport {
+                    operation: "export",
+                    workspace: workspace.root.display().to_string(),
+                    table,
+                    format: format.name().to_string(),
+                    output: destination.display().to_string(),
+                    rows: rows.len(),
+                    bytes: bytes.len(),
+                };
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else if destination.as_os_str() == OsStr::new("-") {
                 output.flush()?;
             } else {
                 writeln!(
@@ -758,6 +794,7 @@ fn parse_undo(args: &[String]) -> Result<Command, WorkspaceError> {
 fn parse_import(args: &[String]) -> Result<Command, WorkspaceError> {
     let mut table = None;
     let mut format = None;
+    let mut json = false;
     let mut positional = Vec::new();
     let mut index = 0;
     let mut options = true;
@@ -771,6 +808,8 @@ fn parse_import(args: &[String]) -> Result<Command, WorkspaceError> {
         } else if options && arg == "--format" {
             index += 1;
             format = Some(DataFormat::parse(&option_value(args, index, "--format")?)?);
+        } else if options && arg == "--json" {
+            json = true;
         } else if options && arg == "--help" {
             return Err(WorkspaceError::Usage(HELP.to_string()));
         } else if options && arg.starts_with('-') && arg != "-" {
@@ -803,11 +842,13 @@ fn parse_import(args: &[String]) -> Result<Command, WorkspaceError> {
         source,
         table,
         format,
+        json,
     })
 }
 
 fn parse_export(args: &[String]) -> Result<Command, WorkspaceError> {
     let mut format = None;
+    let mut json = false;
     let mut positional = Vec::new();
     let mut index = 0;
     let mut options = true;
@@ -818,6 +859,8 @@ fn parse_export(args: &[String]) -> Result<Command, WorkspaceError> {
         } else if options && arg == "--format" {
             index += 1;
             format = Some(DataFormat::parse(&option_value(args, index, "--format")?)?);
+        } else if options && arg == "--json" {
+            json = true;
         } else if options && arg == "--help" {
             return Err(WorkspaceError::Usage(HELP.to_string()));
         } else if options && arg.starts_with('-') && arg != "-" {
@@ -845,6 +888,7 @@ fn parse_export(args: &[String]) -> Result<Command, WorkspaceError> {
         table: positional[1].clone(),
         output,
         format,
+        json,
     })
 }
 
@@ -902,6 +946,28 @@ struct ImportedRows {
     columns: Vec<String>,
     types: Vec<ColumnType>,
     rows: Vec<Vec<ImportedCell>>,
+}
+
+#[derive(Debug, Serialize)]
+struct CliImportReport {
+    operation: &'static str,
+    workspace: String,
+    source: String,
+    format: String,
+    table: Option<String>,
+    bytes: usize,
+    summary: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CliExportReport {
+    operation: &'static str,
+    workspace: String,
+    table: String,
+    format: String,
+    output: String,
+    rows: usize,
+    bytes: usize,
 }
 
 fn import_csv(

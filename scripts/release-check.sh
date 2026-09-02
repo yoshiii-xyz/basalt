@@ -17,6 +17,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+target_dir=${CARGO_TARGET_DIR:-target}
 cd "$repo_root"
 
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -37,8 +38,8 @@ run_check cargo test --all-targets --locked
 run_check env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --locked
 run_check cargo publish --dry-run --locked
 run_check cargo build --release --locked
-run_check bash scripts/smoke-test.sh target/release/basalt
-run_check python3 scripts/differential_sql.py --basalt target/release/basalt
+run_check bash scripts/smoke-test.sh "$target_dir/release/basalt"
+run_check python3 scripts/differential_sql.py --basalt "$target_dir/release/basalt"
 
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/basalt-release-check.XXXXXX")
 trap 'rm -rf -- "$temp_root"' EXIT
@@ -46,9 +47,10 @@ trap 'rm -rf -- "$temp_root"' EXIT
 package_metadata=$(cargo metadata --no-deps --format-version 1 \
     | python3 -c 'import json, sys; p = json.load(sys.stdin)["packages"][0]; print(p["name"] + "\t" + str(p["version"]))')
 IFS=$'\t' read -r package_name package_version <<<"$package_metadata"
-package_file="target/package/${package_name}-${package_version}.crate"
+package_file="$target_dir/package/${package_name}-${package_version}.crate"
 package_dir="$temp_root/${package_name}-${package_version}"
 install_root="$temp_root/install"
+package_target="$temp_root/package-target"
 
 if [[ ! -f "$package_file" ]]; then
     printf 'packaged crate was not found: %s\n' "$package_file" >&2
@@ -61,7 +63,7 @@ if [[ ! -d "$package_dir" ]]; then
     exit 1
 fi
 
-run_check cargo install --locked --root "$install_root" --path "$package_dir"
+run_check env CARGO_TARGET_DIR="$package_target" cargo install --locked --root "$install_root" --path "$package_dir"
 installed_binary="$install_root/bin/basalt"
 if [[ ! -x "$installed_binary" ]]; then
     printf 'packaged install did not produce an executable: %s\n' "$installed_binary" >&2

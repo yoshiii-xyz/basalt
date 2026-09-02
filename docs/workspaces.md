@@ -117,6 +117,19 @@ are not included in SQL dumps. Export refuses to overwrite the workspace
 manifest or database and uses a temporary file before installing a regular
 output file.
 
+Automation can add `--json` to import and export commands to receive one
+machine-readable metadata object on stdout. Import reports the source, format,
+table, byte count, and import summary. Export reports the destination, format,
+row count, and byte count after the file is installed:
+
+```bash
+basalt workspace import --json --table issues .basalt-workspace issues.csv
+basalt workspace export --json .basalt-workspace issues issues.jsonl
+```
+
+An export to `-` is the data stream itself, so `--json` is rejected with stdout
+exports instead of mixing metadata into the file format.
+
 ## Current boundary
 
 The workspace foundation provides `init`, `inspect`, read-only `query`,

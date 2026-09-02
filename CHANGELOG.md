@@ -27,6 +27,10 @@
   claim.
 - Added a release preflight that validates the packaged crate and runs the
   installed-binary CLI/MCP smoke journey from an isolated temporary prefix.
+- Added machine-readable `--json` reports for workspace imports and exports,
+  while keeping stdout exports as clean data streams.
+- Isolated packaged-crate installation build artifacts so release preflight
+  cannot replace the checkout's development binary with stale packaged code.
 - Added a recorded benchmark snapshot with host and client versions, median
   operation timings, and the complete process-model caveat.
 - Added a documented file-format compatibility policy and differential checks
