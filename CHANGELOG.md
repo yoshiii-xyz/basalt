@@ -5,6 +5,9 @@
 - Enforced the MCP execution budget inside the SQL engine so `max_rows` is not
   the only protection against large scans, joins, aggregates, or mutations;
   over-budget operations fail before their state or response is published.
+- Capped MCP workspace imports by rows, columns, and cells, and capped
+  workspace MCP plans at 10,000 affected rows so bounded content and reviewed
+  writes cannot expand into unbounded agent operations.
 - Added release-archive verification for checksums, required files, executable
   contents, and unsafe archive members; the release host job also runs the
   extracted Linux artifact through the installed-binary smoke journey.

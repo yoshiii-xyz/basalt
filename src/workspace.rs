@@ -32,11 +32,15 @@ const WORKSPACE_LOCK_FILE: &str = ".workspace.lock";
 const FORMAT_VERSION: u32 = 1;
 const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_MCP_IMPORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MCP_IMPORT_ROWS: usize = 10_000;
+const MAX_MCP_IMPORT_COLUMNS: usize = 256;
+const MAX_MCP_IMPORT_CELLS: usize = 1_000_000;
 const IMPORT_BATCH_SIZE: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_STATEMENTS: usize = 64;
 const MAX_PREVIEW_MUTATIONS: usize = 32;
 const MAX_PREVIEW_ROWS: usize = 10_000;
+const MAX_MCP_MUTATION_ROWS: usize = 10_000;
 const MAX_MCP_DIFF_ROWS: usize = 10_000;
 const MAX_MCP_EXPORT_ROWS: usize = 10_000;
 const HISTORY_DIR: &str = "history";
@@ -446,7 +450,7 @@ pub fn run<R: Read, W: Write>(
             json,
         } => {
             let workspace = Workspace::open(workspace)?;
-            let report = apply_plan(&workspace, &plan_id, None)?;
+            let report = apply_plan(&workspace, &plan_id, None, None)?;
             if json {
                 serde_json::to_writer_pretty(&mut *output, &report)?;
                 output.write_all(b"\n")?;
@@ -516,11 +520,24 @@ pub fn run<R: Read, W: Write>(
                 table.or_else(|| inferred_table_name(&source))
             };
             let imported = match format {
-                DataFormat::Csv => import_csv(&database, table_name.as_deref(), &bytes)?,
-                DataFormat::Json => import_json(&database, table_name.as_deref(), &bytes)?,
-                DataFormat::JsonLines => {
-                    import_json_lines(&database, table_name.as_deref(), &bytes)?
-                }
+                DataFormat::Csv => import_csv(
+                    &database,
+                    table_name.as_deref(),
+                    &bytes,
+                    ImportLimits::unbounded(),
+                )?,
+                DataFormat::Json => import_json(
+                    &database,
+                    table_name.as_deref(),
+                    &bytes,
+                    ImportLimits::unbounded(),
+                )?,
+                DataFormat::JsonLines => import_json_lines(
+                    &database,
+                    table_name.as_deref(),
+                    &bytes,
+                    ImportLimits::unbounded(),
+                )?,
                 DataFormat::Sql => {
                     if table_name.is_some() {
                         return Err(WorkspaceError::Usage(
@@ -975,6 +992,34 @@ struct ImportedRows {
     rows: Vec<Vec<ImportedCell>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ImportLimits {
+    max_rows: Option<usize>,
+    max_columns: Option<usize>,
+    max_cells: Option<usize>,
+    max_work: Option<usize>,
+}
+
+impl ImportLimits {
+    fn unbounded() -> Self {
+        Self {
+            max_rows: None,
+            max_columns: None,
+            max_cells: None,
+            max_work: None,
+        }
+    }
+
+    fn mcp() -> Self {
+        Self {
+            max_rows: Some(MAX_MCP_IMPORT_ROWS),
+            max_columns: Some(MAX_MCP_IMPORT_COLUMNS),
+            max_cells: Some(MAX_MCP_IMPORT_CELLS),
+            max_work: Some(MCP_EXECUTION_WORK_LIMIT),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct CliImportReport {
     operation: &'static str,
@@ -1001,6 +1046,7 @@ fn import_csv(
     database: &Database,
     table: Option<&str>,
     bytes: &[u8],
+    limits: ImportLimits,
 ) -> Result<Option<String>, WorkspaceError> {
     let table = required_table(table)?;
     let mut reader = ReaderBuilder::new()
@@ -1009,9 +1055,18 @@ fn import_csv(
         .from_reader(bytes);
     let headers = reader.headers()?.clone();
     let columns = validate_headers(&headers)?;
+    enforce_import_limits(0, columns.len(), limits)?;
     let mut rows = Vec::new();
     for record in reader.records() {
+        if let Some(max_rows) = limits.max_rows
+            && rows.len() >= max_rows
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "MCP import is limited to {max_rows} rows; use the CLI for larger imports"
+            )));
+        }
         let record = record?;
+        enforce_import_limits(rows.len().saturating_add(1), columns.len(), limits)?;
         rows.push(record.iter().map(parse_csv_cell).collect());
     }
     let imported = ImportedRows {
@@ -1021,7 +1076,7 @@ fn import_csv(
         rows,
     };
     let summary = imported.summary();
-    import_rows(database, &imported)?;
+    import_rows(database, &imported, limits.max_work)?;
     Ok(Some(summary))
 }
 
@@ -1029,6 +1084,7 @@ fn import_json(
     database: &Database,
     table: Option<&str>,
     bytes: &[u8],
+    limits: ImportLimits,
 ) -> Result<Option<String>, WorkspaceError> {
     let value: JsonValue = serde_json::from_slice(bytes)?;
     let objects = match value {
@@ -1040,13 +1096,14 @@ fn import_json(
             ));
         }
     };
-    import_json_objects(database, table, objects)
+    import_json_objects(database, table, objects, limits)
 }
 
 fn import_json_lines(
     database: &Database,
     table: Option<&str>,
     bytes: &[u8],
+    limits: ImportLimits,
 ) -> Result<Option<String>, WorkspaceError> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         WorkspaceError::Invalid(format!("JSON Lines input is not UTF-8: {error}"))
@@ -1055,6 +1112,13 @@ fn import_json_lines(
     for (line_number, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
+        }
+        if let Some(max_rows) = limits.max_rows
+            && objects.len() >= max_rows
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "MCP import is limited to {max_rows} rows; use the CLI for larger imports"
+            )));
         }
         let value: JsonValue = serde_json::from_str(line).map_err(|error| {
             WorkspaceError::Invalid(format!("invalid JSON on line {}: {error}", line_number + 1))
@@ -1067,20 +1131,23 @@ fn import_json_lines(
         }
         objects.push(value);
     }
-    import_json_objects(database, table, objects)
+    import_json_objects(database, table, objects, limits)
 }
 
 fn import_json_objects(
     database: &Database,
     table: Option<&str>,
     objects: Vec<JsonValue>,
+    limits: ImportLimits,
 ) -> Result<Option<String>, WorkspaceError> {
     let table = required_table(table)?;
+    let object_count = objects.len();
     if objects.is_empty() {
         return Err(WorkspaceError::Invalid(
             "JSON import contains no objects; a table schema cannot be inferred".to_string(),
         ));
     }
+    enforce_import_limits(object_count, 0, limits)?;
     let mut names = BTreeSet::new();
     let mut parsed_objects = Vec::with_capacity(objects.len());
     for value in objects {
@@ -1101,6 +1168,7 @@ fn import_json_objects(
         ));
     }
     let columns: Vec<String> = names.into_iter().collect();
+    enforce_import_limits(object_count, columns.len(), limits)?;
     let rows = parsed_objects
         .iter()
         .map(|object| {
@@ -1122,8 +1190,38 @@ fn import_json_objects(
         rows,
     };
     let summary = imported.summary();
-    import_rows(database, &imported)?;
+    import_rows(database, &imported, limits.max_work)?;
     Ok(Some(summary))
+}
+
+fn enforce_import_limits(
+    rows: usize,
+    columns: usize,
+    limits: ImportLimits,
+) -> Result<(), WorkspaceError> {
+    if let Some(max_rows) = limits.max_rows
+        && rows > max_rows
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP import is limited to {max_rows} rows; use the CLI for larger imports"
+        )));
+    }
+    if let Some(max_columns) = limits.max_columns
+        && columns > max_columns
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP import is limited to {max_columns} columns; use the CLI for wider imports"
+        )));
+    }
+    if let Some(max_cells) = limits.max_cells {
+        let cells = rows.saturating_mul(columns);
+        if cells > max_cells {
+            return Err(WorkspaceError::Invalid(format!(
+                "MCP import is limited to {max_cells} cells; use the CLI for larger imports"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn import_sql(database: &Database, bytes: &[u8]) -> Result<Option<String>, WorkspaceError> {
@@ -1353,7 +1451,7 @@ struct TableSnapshot {
 }
 
 fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
-    preview_plan_with_output_limit(workspace, sql, None, None)
+    preview_plan_with_output_limit(workspace, sql, None, None, None)
 }
 
 fn preview_plan_with_output_limit(
@@ -1361,6 +1459,7 @@ fn preview_plan_with_output_limit(
     sql: &str,
     max_output_bytes: Option<usize>,
     max_work: Option<usize>,
+    max_mutation_rows: Option<usize>,
 ) -> Result<PlanRecord, WorkspaceError> {
     if sql.len() > MAX_PREVIEW_BYTES {
         return Err(WorkspaceError::Invalid(format!(
@@ -1415,8 +1514,10 @@ fn preview_plan_with_output_limit(
     connection.execute_with_budget(&Statement::Begin, &mut budget)?;
     let result = (|| {
         let mut items = Vec::with_capacity(statements.len());
+        let mut mutation_rows = 0;
         for (index, statement) in statements.iter().enumerate() {
             let result = connection.execute_with_budget(statement, &mut budget)?;
+            enforce_mutation_row_limit(&mut mutation_rows, &result, max_mutation_rows)?;
             if let StatementResult::Select { rows, .. } = &result
                 && rows.len() > MAX_PREVIEW_ROWS
             {
@@ -1514,6 +1615,28 @@ fn preview_item(statement: usize, result: &StatementResult) -> PreviewItem {
         rows_returned,
         object,
     }
+}
+
+fn enforce_mutation_row_limit(
+    total_rows: &mut usize,
+    result: &StatementResult,
+    max_rows: Option<usize>,
+) -> Result<(), WorkspaceError> {
+    let rows = match result {
+        StatementResult::Insert { rows_affected }
+        | StatementResult::Update { rows_affected }
+        | StatementResult::Delete { rows_affected } => *rows_affected,
+        _ => return Ok(()),
+    };
+    *total_rows = total_rows.saturating_add(rows);
+    if let Some(max_rows) = max_rows
+        && *total_rows > max_rows
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP workspace mutations are limited to {max_rows} affected rows per plan; split the operation into smaller reviewed plans"
+        )));
+    }
+    Ok(())
 }
 
 fn is_mutation_statement(statement: &Statement) -> bool {
@@ -1908,6 +2031,7 @@ fn apply_plan(
     workspace: &Workspace,
     requested_plan_id: &str,
     max_work: Option<usize>,
+    max_mutation_rows: Option<usize>,
 ) -> Result<ApplyReport, WorkspaceError> {
     let plan = load_plan(workspace, requested_plan_id)?;
     if !plan.statements.iter().any(|item| item.mutating) {
@@ -2016,12 +2140,27 @@ fn apply_plan(
     } else {
         connection.execute_sql(&plan.sql)
     };
-    if let Err(error) = execution {
-        let _ = connection.execute_sql("ROLLBACK");
-        change.status = ChangeStatus::Failed;
-        change.error = Some(error.to_string());
-        write_atomic_json(&change_file, &change)?;
-        return Err(error.into());
+    let results = match execution {
+        Ok(results) => results,
+        Err(error) => {
+            let _ = connection.execute_sql("ROLLBACK");
+            change.status = ChangeStatus::Failed;
+            change.error = Some(error.to_string());
+            write_atomic_json(&change_file, &change)?;
+            return Err(error.into());
+        }
+    };
+    let mut mutation_rows = 0;
+    for result in &results {
+        if let Err(error) =
+            enforce_mutation_row_limit(&mut mutation_rows, result, max_mutation_rows)
+        {
+            let _ = connection.execute_sql("ROLLBACK");
+            change.status = ChangeStatus::Failed;
+            change.error = Some(error.to_string());
+            write_atomic_json(&change_file, &change)?;
+            return Err(error);
+        }
     }
     if let Err(error) = connection.execute_with_budget(&Statement::Commit, &mut budget) {
         change.status = ChangeStatus::Unresolved;
@@ -2347,6 +2486,7 @@ pub(crate) fn mcp_preview(
         sql,
         Some(max_output_bytes),
         Some(MCP_EXECUTION_WORK_LIMIT),
+        Some(MAX_MCP_MUTATION_ROWS),
     )?;
     Ok(PlanReport::from(&plan))
 }
@@ -2355,7 +2495,12 @@ pub(crate) fn mcp_apply(
     workspace: &Workspace,
     plan_id: &str,
 ) -> Result<ApplyReport, WorkspaceError> {
-    apply_plan(workspace, plan_id, Some(MCP_EXECUTION_WORK_LIMIT))
+    apply_plan(
+        workspace,
+        plan_id,
+        Some(MCP_EXECUTION_WORK_LIMIT),
+        Some(MAX_MCP_MUTATION_ROWS),
+    )
 }
 
 pub(crate) fn mcp_history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
@@ -2412,10 +2557,11 @@ pub(crate) fn mcp_import(
 
     // Parse and type-check before touching the durable workspace. This keeps a
     // malformed agent payload from creating a failed history record.
-    let validated_summary = validate_mcp_import(format, table, bytes)?;
+    let validated_summary = validate_mcp_import(format, table, bytes, ImportLimits::mcp())?;
 
     let database = workspace.database()?;
-    database.checkpoint()?;
+    let mut preflight_budget = ExecutionBudget::bounded(MCP_EXECUTION_WORK_LIMIT);
+    database.checkpoint_with_budget(&mut preflight_budget)?;
     let base_state = state_fingerprint(&workspace.database_path())?;
     let base_generation = database.generation();
     ensure_history_dirs(workspace)?;
@@ -2531,9 +2677,11 @@ pub(crate) fn mcp_import(
     }
 
     let imported = match format {
-        DataFormat::Csv => import_csv(&database, Some(table), bytes),
-        DataFormat::Json => import_json(&database, Some(table), bytes),
-        DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes),
+        DataFormat::Csv => import_csv(&database, Some(table), bytes, ImportLimits::mcp()),
+        DataFormat::Json => import_json(&database, Some(table), bytes, ImportLimits::mcp()),
+        DataFormat::JsonLines => {
+            import_json_lines(&database, Some(table), bytes, ImportLimits::mcp())
+        }
         DataFormat::Sql => unreachable!(),
     };
     let summary = match imported {
@@ -2546,6 +2694,9 @@ pub(crate) fn mcp_import(
         }
     };
 
+    // The bounded import transaction has already charged the resulting state
+    // before publishing it. This checkpoint canonicalizes that bounded state
+    // for the recovery record.
     if let Err(error) = database.checkpoint() {
         change.status = ChangeStatus::Unresolved;
         change.error = Some(format!("import committed but checkpoint failed: {error}"));
@@ -2586,12 +2737,13 @@ fn validate_mcp_import(
     format: DataFormat,
     table: &str,
     bytes: &[u8],
+    limits: ImportLimits,
 ) -> Result<String, WorkspaceError> {
     let database = Database::in_memory();
     match format {
-        DataFormat::Csv => import_csv(&database, Some(table), bytes),
-        DataFormat::Json => import_json(&database, Some(table), bytes),
-        DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes),
+        DataFormat::Csv => import_csv(&database, Some(table), bytes, limits),
+        DataFormat::Json => import_json(&database, Some(table), bytes, limits),
+        DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes, limits),
         DataFormat::Sql => unreachable!(),
     }
     .map(|summary| summary.unwrap_or_else(|| "import completed".to_string()))
@@ -2781,7 +2933,11 @@ impl ImportedRows {
     }
 }
 
-fn import_rows(database: &Database, imported: &ImportedRows) -> Result<(), WorkspaceError> {
+fn import_rows(
+    database: &Database,
+    imported: &ImportedRows,
+    max_work: Option<usize>,
+) -> Result<(), WorkspaceError> {
     validate_name(&imported.table, "table name")?;
     if imported.columns.is_empty() {
         return Err(WorkspaceError::Invalid(
@@ -2809,10 +2965,13 @@ fn import_rows(database: &Database, imported: &ImportedRows) -> Result<(), Works
         definitions.join(", ")
     );
 
+    let mut budget = max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
     let mut connection = database.connect();
-    connection.execute_sql("BEGIN")?;
+    connection.execute_with_budget(&Statement::Begin, &mut budget)?;
     let result = (|| {
-        connection.execute_sql(&create)?;
+        connection.execute_sql_using_budget(&create, &mut budget)?;
         for chunk in imported.rows.chunks(IMPORT_BATCH_SIZE) {
             if chunk.is_empty() {
                 continue;
@@ -2832,9 +2991,9 @@ fn import_rows(database: &Database, imported: &ImportedRows) -> Result<(), Works
                 quote_identifier(&imported.table),
                 rows.join(", ")
             );
-            connection.execute_sql(&insert)?;
+            connection.execute_sql_using_budget(&insert, &mut budget)?;
         }
-        connection.execute_sql("COMMIT")?;
+        connection.execute_with_budget(&Statement::Commit, &mut budget)?;
         Ok::<(), WorkspaceError>(())
     })();
     if let Err(error) = result {
@@ -3602,6 +3761,88 @@ mod tests {
     }
 
     #[test]
+    fn mcp_import_limits_cover_rows_columns_and_cells() {
+        let limits = ImportLimits::mcp();
+
+        let rows = enforce_import_limits(MAX_MCP_IMPORT_ROWS + 1, 1, limits).unwrap_err();
+        assert!(rows.to_string().contains("limited to 10000 rows"));
+
+        let columns = enforce_import_limits(1, MAX_MCP_IMPORT_COLUMNS + 1, limits).unwrap_err();
+        assert!(columns.to_string().contains("limited to 256 columns"));
+
+        let cells = enforce_import_limits(10_000, 101, limits).unwrap_err();
+        assert!(cells.to_string().contains("limited to 1000000 cells"));
+    }
+
+    #[test]
+    fn mcp_mutation_row_limit_is_cumulative() {
+        let mut total = 0;
+        enforce_mutation_row_limit(
+            &mut total,
+            &StatementResult::Update {
+                rows_affected: 6_000,
+            },
+            Some(MAX_MCP_MUTATION_ROWS),
+        )
+        .unwrap();
+        let error = enforce_mutation_row_limit(
+            &mut total,
+            &StatementResult::Delete {
+                rows_affected: 4_001,
+            },
+            Some(MAX_MCP_MUTATION_ROWS),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("limited to 10000 affected rows"));
+    }
+
+    #[test]
+    fn mcp_rejects_an_over_limit_mutation_without_persisting_or_committing_it() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-mutation-limit-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let database = workspace.database().unwrap();
+        database
+            .execute_sql("CREATE TABLE events (id INTEGER)")
+            .unwrap();
+        let values = (1..=MAX_MCP_MUTATION_ROWS + 1)
+            .map(|id| format!("({id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        database
+            .execute_sql(&format!("INSERT INTO events VALUES {values}"))
+            .unwrap();
+        database.checkpoint().unwrap();
+        drop(database);
+
+        let error = mcp_preview(&workspace, "DELETE FROM events", 1_048_576).unwrap_err();
+        assert!(error.to_string().contains("limited to 10000 affected rows"));
+        assert!(!root.join(HISTORY_DIR).exists());
+
+        let plan = preview_plan(&workspace, "DELETE FROM events").unwrap();
+        let error = mcp_apply(&workspace, &plan.plan_id).unwrap_err();
+        assert!(error.to_string().contains("limited to 10000 affected rows"));
+        let changes = load_changes(&workspace).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, ChangeStatus::Failed);
+
+        let database = workspace.database().unwrap();
+        assert_eq!(
+            database.row_count("events").unwrap(),
+            MAX_MCP_MUTATION_ROWS + 1
+        );
+        drop(database);
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_an_oversized_mcp_preview_before_persisting_its_plan() {
         let root = std::env::temp_dir().join(format!(
             "basalt-workspace-preview-limit-test-{}-{}",
@@ -3647,7 +3888,8 @@ mod tests {
         )
         .unwrap();
         let request_key = import_request_key(format, table, content.as_bytes());
-        let summary = validate_mcp_import(format, table, content.as_bytes()).unwrap();
+        let summary =
+            validate_mcp_import(format, table, content.as_bytes(), ImportLimits::mcp()).unwrap();
         let failed = ChangeRecord {
             format_version: FORMAT_VERSION,
             sequence: 1,

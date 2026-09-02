@@ -226,8 +226,8 @@ In workspace mode, use this sequence:
 
 1. When data is not already present, call `workspace_import` with an explicit
    table, format, and content payload. The tool accepts only CSV, JSON, or
-   JSON Lines, caps content at 16 MiB, never accepts a filesystem path, and
-   returns a recoverable `change_id`.
+   JSON Lines, caps content at 16 MiB, 10,000 rows, 256 columns, and 1,000,000
+   cells, never accepts a filesystem path, and returns a recoverable `change_id`.
 2. Call `workspace_inspect` or `query` to understand the current data.
 3. Call `workspace_preview` with the mutation. Review the returned exact `sql`
    and impact summary, then keep the returned `plan_id`.
@@ -251,8 +251,9 @@ transaction boundary. `workspace_apply` rejects stale plans and never silently
 applies a mutation against a changed base state.
 
 Workspace previews accept at most 64 statements and 32 mutating statements per
-call. This bounds the impact described by one plan; larger jobs should be
-split into separately reviewed plans. SQL executed by `query`, direct-mode
+call. MCP workspace previews and applies also accept at most 10,000 affected
+rows per plan. This bounds the impact described by one plan; larger jobs should
+be split into separately reviewed plans. SQL executed by `query`, direct-mode
 `execute`, `workspace_preview`, and `workspace_apply` also shares a
 1,000,000-unit engine work budget per request. The budget is enforced while
 the engine snapshots state, scans, joins, groups, projects, sorts, prepares,
@@ -287,12 +288,14 @@ boundary.
 
 `workspace_import` is an explicit atomic ingress operation rather than a raw
 SQL escape hatch. It requires `--allow-writes`, creates a new table, and stores
-the pre-import recovery point in workspace history. An exact retry after a
-lost response returns the original import receipt while the workspace remains
-at the recorded result; it never imports the table twice. Use
-`workspace_undo` to reverse it while it is the latest committed change. SQL
-dump imports remain a CLI-only operation because they can contain arbitrary
-DDL and DML; use the preview/apply lifecycle for SQL changes through MCP.
+the pre-import recovery point in workspace history. Its content is limited to
+16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells; use the CLI for larger
+imports. An exact retry after a lost response returns the original import
+receipt while the workspace remains at the recorded result; it never imports
+the table twice. Use `workspace_undo` to reverse it while it is the latest
+committed change. SQL dump imports remain a CLI-only operation because they can
+contain arbitrary DDL and DML; use the preview/apply lifecycle for SQL changes
+through MCP.
 
 In direct database mode, all SQL tools operate on one connection for the
 lifetime of the MCP process. When `--allow-writes` is enabled, transactions can

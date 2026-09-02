@@ -292,7 +292,7 @@ struct WorkspaceImportInput {
     table: String,
     /// `csv`, `json`, or `jsonl`.
     format: String,
-    /// UTF-8 input content. MCP imports are capped at 16 MiB and never read a filesystem path.
+    /// UTF-8 input content. MCP imports are capped at 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells; they never read a filesystem path.
     content: String,
 }
 
@@ -704,7 +704,7 @@ impl BasaltMcp {
     /// Import bounded structured-data content into a workspace with recovery.
     #[tool(
         name = "workspace_import",
-        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; use the CLI for SQL dump imports.",
+        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. Content is limited to 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; use the CLI for SQL dump imports or larger imports.",
         annotations(
             title = "Import workspace data",
             read_only_hint = false,
@@ -751,7 +751,7 @@ impl BasaltMcp {
     /// Preview a workspace mutation and persist its exact plan.
     #[tool(
         name = "workspace_preview",
-        description = "Preview a mutating SQL sequence in an isolated transaction and return the exact SQL, impact summary, and plan ID. The workspace data is not changed; apply the returned plan explicitly.",
+        description = "Preview a mutating SQL sequence in an isolated transaction and return the exact SQL, impact summary, and plan ID. A workspace MCP plan may affect at most 10,000 rows. The workspace data is not changed; apply the returned plan explicitly.",
         annotations(
             title = "Preview workspace write",
             read_only_hint = false,
@@ -781,7 +781,7 @@ impl BasaltMcp {
     /// Apply one exact workspace plan when writes are enabled.
     #[tool(
         name = "workspace_apply",
-        description = "Apply exactly one plan returned by workspace_preview. Writes are disabled unless the MCP process was started with --allow-writes; stale plans are rejected and a recovery point is created first.",
+        description = "Apply exactly one plan returned by workspace_preview. A workspace MCP plan may affect at most 10,000 rows. Writes are disabled unless the MCP process was started with --allow-writes; stale plans are rejected and a recovery point is created first.",
         annotations(
             title = "Apply workspace plan",
             read_only_hint = false,

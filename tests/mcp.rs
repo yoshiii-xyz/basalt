@@ -910,7 +910,7 @@ fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
         .expect("workspace init should run");
     assert!(init.status.success(), "workspace init failed: {init:?}");
 
-    let content = (1..=10_001).map(|id| format!("{id}\n")).collect::<String>();
+    let content = (1..=10_000).map(|id| format!("{id}\n")).collect::<String>();
     let mut server = McpProcess::start_with_workspace(&workspace, true);
     initialize_legacy(&mut server);
     let imported = server.request(
@@ -926,9 +926,31 @@ fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
         }),
     );
     assert_ne!(result(&imported)["isError"], true);
+    let import_change_id = result(&imported)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("import should return a change ID")
+        .to_owned();
+    server.close();
+
+    let database = workspace.join("data.basalt");
+    let appended = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args([
+            "--command",
+            "INSERT INTO events VALUES (10001)",
+            path_arg(&database),
+        ])
+        .output()
+        .expect("appending a row should run");
+    assert!(
+        appended.status.success(),
+        "appending a row failed: {appended:?}"
+    );
+
+    let mut server = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut server);
 
     let exported = server.request(
-        3,
+        2,
         "tools/call",
         json!({
             "name": "workspace_export",
@@ -944,12 +966,12 @@ fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
     );
 
     let diff = server.request(
-        4,
+        3,
         "tools/call",
         json!({
             "name": "workspace_diff",
             "arguments": {
-                "change_id": result(&imported)["structuredContent"]["change_id"]
+                "change_id": import_change_id
             }
         }),
     );
@@ -959,6 +981,53 @@ fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
             .as_str()
             .expect("diff rejection should include text")
             .contains("MCP diff is limited to 10000 rows")
+    );
+    server.close();
+}
+
+#[test]
+fn workspace_mcp_import_rejects_an_oversized_row_payload_before_touching_state() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let content = (1..=10_001).map(|id| format!("{id}\n")).collect::<String>();
+    let mut server = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut server);
+    let imported = server.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "events",
+                "format": "csv",
+                "content": format!("id\n{content}")
+            }
+        }),
+    );
+    assert_eq!(result(&imported)["isError"], true);
+    assert!(
+        result(&imported)["content"][0]["text"]
+            .as_str()
+            .expect("import rejection should include text")
+            .contains("limited to 10000 rows")
+    );
+
+    let inspect = server.request(
+        3,
+        "tools/call",
+        json!({"name": "workspace_inspect", "arguments": {}}),
+    );
+    assert!(
+        result(&inspect)["structuredContent"]["tables"]
+            .as_array()
+            .expect("workspace tables should be an array")
+            .is_empty()
     );
     server.close();
 }

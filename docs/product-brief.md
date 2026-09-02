@@ -227,8 +227,10 @@ database-level snapshot diff. The output should state its precision honestly.
   MCP never accepts an arbitrary source path or SQL dump as an import payload.
 - Requests have limits for SQL size, rows, statements, mutation count, and
   output size; MCP SQL also has an engine-enforced work budget so `max_rows`
-  cannot be mistaken for an execution bound. MCP workspace diffs also cap the
-  rows inspected in each compared database.
+  cannot be mistaken for an execution bound. MCP workspace imports are capped
+  by bytes, rows, columns, and cells, and workspace plans are capped at 10,000
+  affected rows. MCP workspace diffs also cap the rows inspected in each
+  compared database.
 - A failed preview never changes durable state.
 - An applied operation always has a recovery point or fails before mutation.
 - Exact import, apply, and undo retries return the original receipt only when
