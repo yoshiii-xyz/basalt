@@ -244,6 +244,15 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Verify release archives
+        run: |
+          python3 scripts/verify-release-artifacts.py target/distrib
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf -- "$smoke_root"' EXIT
+          archive="target/distrib/basalt-db-x86_64-unknown-linux-gnu.tar.xz"
+          tar --extract --xz --file "$archive" --directory "$smoke_root"
+          bash scripts/smoke-test.sh \
+            "$smoke_root/basalt-db-x86_64-unknown-linux-gnu/basalt"
       - id: host
         shell: bash
         run: |

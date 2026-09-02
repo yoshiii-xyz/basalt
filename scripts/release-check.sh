@@ -83,6 +83,19 @@ fi
 
 if command -v dist >/dev/null 2>&1; then
     run_check dist plan --output-format=json --no-local-paths >"$temp_root/dist-plan.json"
+    host_target=$(rustc -vV | awk '$1 == "host:" { print $2 }')
+    if [[ -z "$host_target" ]]; then
+        printf 'could not determine the local Rust host target\n' >&2
+        exit 1
+    fi
+    if [[ "$host_target" == *windows* ]]; then
+        release_archive="$target_dir/distrib/basalt-db-${host_target}.zip"
+    else
+        release_archive="$target_dir/distrib/basalt-db-${host_target}.tar.xz"
+    fi
+    run_check dist build --target="$host_target" --artifacts=local --output-format=json \
+        >"$temp_root/dist-build.json"
+    run_check python3 scripts/verify-release-artifacts.py "$release_archive"
 else
     printf '\n==> dist plan (skipped: dist is not installed)\n'
 fi

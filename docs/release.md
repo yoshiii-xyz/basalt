@@ -27,6 +27,12 @@ runs the installed-binary CLI/MCP smoke journey. It also runs `cargo audit`
 and `dist plan` when those tools are installed. The full 10,000-row benchmark
 remains a separate measurement because its output is machine-dependent.
 
+When `dist` is installed, the preflight also builds the local release archive
+for the host target and runs `scripts/verify-release-artifacts.py` against that
+exact archive and checksum. The release workflow applies the same structural
+check to every target archive before hosting them, then extracts the native
+Linux archive and runs the complete smoke journey from the extracted binary.
+
 The test command includes the throughput benchmark target. Run the in-process
 benchmark directly when a storage, planner, or execution change could affect
 its result:
@@ -136,6 +142,9 @@ artifact and rerun validation whenever its version changes.
   `basalt` before publishing to crates.io.
 - Inspect `cargo package --list` for accidental files and verify the README
   logo and links render from the packaged crate/repository.
+- Verify every generated archive and checksum with
+  `python3 scripts/verify-release-artifacts.py target/distrib` before hosting
+  release assets.
 - Review `git diff --check`, `git status`, and the final commit history.
 - Push the release commit only after all required checks and smoke tests pass.
 

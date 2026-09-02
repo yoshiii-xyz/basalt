@@ -232,6 +232,7 @@ calls.
 | scripts/benchmark_workspace.py | Reproducible workflow comparison harness |
 | scripts/differential_sql.py | Supported-subset SQLite differential checks |
 | scripts/mcp-smoke.py | Installed-binary writable MCP smoke test |
+| scripts/verify-release-artifacts.py | Release archive checksum and contents check |
 | scripts/release-check.sh | Packaged-crate and release preflight |
 | scripts/smoke-test.sh | Installed-binary CLI and read-only MCP smoke test |
 | fuzz/ | Optional libFuzzer parser and snapshot targets |
