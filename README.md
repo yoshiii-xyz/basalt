@@ -48,7 +48,7 @@ The published package is named `basalt-db`; the installed command remains
 
 Tagged releases include checksummed installers and prebuilt binaries for Linux,
 macOS, and Windows. See [GitHub Releases](https://github.com/joshiii-xyz/basalt/releases)
-for the current no-toolchain install. The `v0.1.2` release has been verified
+for the current no-toolchain install. The latest tagged release is verified
 from its published installer and its checksums:
 
 ```bash

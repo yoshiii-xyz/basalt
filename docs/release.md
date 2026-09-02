@@ -65,16 +65,15 @@ override and archive-verification step after regenerating the generated file.
 
 The package is named `basalt-db` to avoid an existing crates.io name conflict,
 but every archive contains a `basalt` executable. The crate install is
-`cargo install basalt-db --locked`; the `v0.1.2` prebuilt download and installer
+`cargo install basalt-db --locked`; the current prebuilt download and installer
 are published and have passed the public checksum and isolated consumer smoke
 checks.
 
 The [production-readiness contract](production-readiness.md) is the authority
 for technical scope, fixed limits, backup/restore, and evidence. The public
-`v0.1.2` crate and GitHub release artifacts include the hardening described by
-that contract. The MCP Registry is a separate publication and still lists
-`v0.1.1`; update it only after its `server.json` version and corresponding
-release assets are verified together.
+crate and GitHub release artifacts include the hardening described by that
+contract. The MCP Registry is a separate publication and lists the verified
+metadata alongside those release assets.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles and tests on macOS and Windows runners. The release workflow's
@@ -83,7 +82,7 @@ artifact matrix remains the source of truth for the published architectures.
 The MCP Registry is a separate metadata publication. Its current preview
 supports multiple package types, including Cargo and MCPB, but does not host
 the artifacts themselves. The repository contains `server.json` and a visible
-`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The `v0.1.1`
+`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The current
 metadata is published at the [Basalt Registry listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
 The metadata verifier checks that both version fields match the Cargo package
 and that the package launches the `mcp` subcommand. Publish future metadata
@@ -92,9 +91,10 @@ only after its corresponding crate and GitHub release are available.
 ## Publication steps for future releases
 
 Publication is intentionally manual because it creates external releases. The
-following sequence was completed for `v0.1.2`; replace `VERSION` with a new
-version for a future release. Run the dry run and publish the package first,
-then push the version tag to start the GitHub release workflow:
+following sequence is the repeatable procedure for a future release. Replace
+the example `VERSION` with the version being released. Run the dry run and
+publish the package first, then push the version tag to start the GitHub
+release workflow:
 
 Make the release commit's README, changelog, and packaged documentation final
 before publishing. Do not update those files after `cargo publish` to announce
@@ -107,7 +107,7 @@ publication.
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-VERSION=0.1.3
+VERSION=0.1.4
 git tag -a "v${VERSION}" -m "Basalt v${VERSION}"
 git push origin "v${VERSION}"
 ```

@@ -112,9 +112,8 @@ adoption claim. Record external-user results separately in
 
 ## Release status
 
-The public crate and binary release are `0.1.2`. Their tag, archives,
-checksums, installer, and isolated consumer smoke test have been verified. The
-MCP Registry is a separate metadata publication and still lists `0.1.1`; it is
-not described as a `0.1.2` release until that publication is completed and
-verified. A fresh crates.io publish requires fresh operator authorization; no
+The public crate, binary release, and MCP Registry entry are synchronized at
+the current release version. Their tag, archives, checksums, installer,
+metadata, and isolated consumer smoke test have been verified. A fresh
+crates.io or MCP Registry publish requires fresh operator authorization; no
 repository file stores registry credentials.

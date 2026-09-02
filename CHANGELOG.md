@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 — 2026-09-02
+
+- Corrected packaged release documentation so the published crate describes
+  the current release state instead of the pre-publication `0.1.2` candidate.
+- Made release-status wording version-neutral so the crate, binary release, and
+  MCP Registry metadata stay consistent across future releases.
+
 ## 0.1.2 — 2026-09-02
 
 - Preserved monotonic database generations during workspace undo by restoring

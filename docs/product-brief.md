@@ -183,7 +183,7 @@ The current repository already provides useful foundations:
 
 The current product has these remaining limitations and validation gaps:
 
-- The `basalt-db` crate and the `v0.1.2` GitHub binary release are published;
+- The `basalt-db` crate and the current GitHub binary release are published;
   the release workflow and isolated consumer smoke tests verify the normal-user
   paths.
 - The package name is `basalt-db` because `basalt` is already present in the
@@ -307,7 +307,7 @@ The official registry currently documents multiple package types, including
 Cargo and MCPB, but it is still in preview and stores installation metadata
 rather than artifacts. Basalt carries a checked-in `server.json`, the visible
 Cargo ownership marker, and a published
-[`io.github.joshiii-xyz/basalt` 0.1.1 listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
+[`io.github.joshiii-xyz/basalt` listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
 
 ## Finite implementation plan
 
@@ -351,9 +351,8 @@ an ingestion script or knowing the internal file layout.
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests
   are implemented and verified locally; hosted CI also checks macOS and Windows
-  compilation and tests. The `basalt-db` 0.1.2 crate, GitHub release, public
-  checksums, and installer are now published and verified. The MCP Registry
-  entry remains at 0.1.1 pending its separate metadata publication.
+  compilation and tests. The current `basalt-db` crate, GitHub release, public
+  checksums, installer, and MCP Registry entry are now published and verified.
   No adoption claim is made until external users exercise the workflow.
 
 ### Milestone 3 — Reversible state
@@ -411,8 +410,7 @@ The release is complete only when all of these are true:
    blanket performance claim is made.
 8. The supported SQL, durability model, security boundary, file format, and
    non-goals are documented.
-9. All required local and hosted quality checks pass on the pushed release
-   candidate.
+9. All required local and hosted quality checks pass on the pushed release.
 
 External adoption is not something the repository can claim on its own. After
 the implementation is complete, the README should invite targeted early users
