@@ -975,7 +975,7 @@ impl BasaltMcp {
 impl ServerHandler for BasaltMcp {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.target.is_workspace() {
-            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
+            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, workspace_plan to reload a saved plan after a lost response or restart, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
         } else if self.allow_writes {
             "Basalt direct database mode has write access because --allow-writes was explicitly provided. Use query for read-only SELECT or EXPLAIN SELECT; use execute for writes and transaction control. Results are bounded."
         } else {
