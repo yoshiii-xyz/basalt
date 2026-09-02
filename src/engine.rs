@@ -37,6 +37,10 @@ impl ExecutionBudget {
         }
     }
 
+    fn is_unlimited(&self) -> bool {
+        self.remaining.is_none()
+    }
+
     fn consume(&mut self, units: usize, operation: &str) -> Result<(), DbError> {
         let Some(remaining) = &mut self.remaining else {
             return Ok(());
@@ -56,16 +60,32 @@ impl ExecutionBudget {
     }
 
     fn row(&mut self, row: &Row, operation: &str) -> Result<(), DbError> {
+        if self.is_unlimited() {
+            return Ok(());
+        }
         self.consume(row_work_units(row), operation)
     }
 
     fn table_clone(&mut self, table: &Table, operation: &str) -> Result<(), DbError> {
+        if self.is_unlimited() {
+            return Ok(());
+        }
         let units = table
             .scan()
             .fold(table.columns.len().max(1), |total, (_, row)| {
                 total.saturating_add(row_work_units(row))
             });
         self.consume(units, operation)
+    }
+
+    pub(crate) fn state_clone(&mut self, state: &State, operation: &str) -> Result<(), DbError> {
+        if self.is_unlimited() {
+            return Ok(());
+        }
+        for table in state.tables.values() {
+            self.table_clone(table, operation)?;
+        }
+        Ok(())
     }
 }
 

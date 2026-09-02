@@ -167,8 +167,9 @@ The current product still has blocking gaps:
   concurrently.
 - MCP `execute` is powerful and can mutate data; annotations alone are not a
   deterministic safety boundary. Its SQL engine now also enforces a
-  1,000,000-unit cooperative work budget per request, but explicit write
-  approval and the workspace plan lifecycle remain required.
+  1,000,000-unit cooperative work budget per request, including bounded
+  snapshot and commit preparation, but explicit write approval and the
+  workspace plan lifecycle remain required.
 - The benchmark is an internal workload, not a comparable result against an
   incumbent.
 - No release has been published yet, so the normal-user install path is

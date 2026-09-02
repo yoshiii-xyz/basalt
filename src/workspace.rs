@@ -1405,15 +1405,15 @@ fn preview_plan_with_output_limit(
     }
 
     let database = workspace.database()?;
-    database.checkpoint()?;
+    let mut budget = max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
+    database.checkpoint_with_budget(&mut budget)?;
     let base_generation = database.generation();
     let base_state = state_fingerprint(&workspace.database_path())?;
     let mut connection = database.connect();
-    connection.execute_sql("BEGIN")?;
+    connection.execute_with_budget(&Statement::Begin, &mut budget)?;
     let result = (|| {
-        let mut budget = max_work
-            .map(ExecutionBudget::bounded)
-            .unwrap_or_else(ExecutionBudget::unlimited);
         let mut items = Vec::with_capacity(statements.len());
         for (index, statement) in statements.iter().enumerate() {
             let result = connection.execute_with_budget(statement, &mut budget)?;
@@ -1429,8 +1429,16 @@ fn preview_plan_with_output_limit(
         Ok::<Vec<PreviewItem>, WorkspaceError>(items)
     })();
     let rollback = connection.execute_sql("ROLLBACK");
-    let preview_items = result?;
-    rollback?;
+    let preview_items = match result {
+        Ok(items) => {
+            rollback?;
+            items
+        }
+        Err(error) => {
+            let _ = rollback;
+            return Err(error);
+        }
+    };
     let plan_id = plan_id_for(&base_state, sql);
     let plan = PlanRecord {
         format_version: FORMAT_VERSION,
@@ -1909,7 +1917,10 @@ fn apply_plan(
     }
     ensure_history_dirs(workspace)?;
     let database = workspace.database()?;
-    database.checkpoint()?;
+    let mut budget = max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
+    database.checkpoint_with_budget(&mut budget)?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let change_id = apply_change_id(&plan.plan_id, &plan.base_state);
     let change_file = change_path(workspace, &change_id);
@@ -1994,15 +2005,16 @@ fn apply_plan(
     }
 
     let mut connection = database.connect();
-    if let Err(error) = connection.execute_sql("BEGIN") {
+    if let Err(error) = connection.execute_with_budget(&Statement::Begin, &mut budget) {
         change.status = ChangeStatus::Failed;
         change.error = Some(error.to_string());
         write_atomic_json(&change_file, &change)?;
         return Err(error.into());
     }
-    let execution = match max_work {
-        Some(max_work) => connection.execute_sql_with_budget(&plan.sql, max_work),
-        None => connection.execute_sql(&plan.sql),
+    let execution = if max_work.is_some() {
+        connection.execute_sql_using_budget(&plan.sql, &mut budget)
+    } else {
+        connection.execute_sql(&plan.sql)
     };
     if let Err(error) = execution {
         let _ = connection.execute_sql("ROLLBACK");
@@ -2011,7 +2023,7 @@ fn apply_plan(
         write_atomic_json(&change_file, &change)?;
         return Err(error.into());
     }
-    if let Err(error) = connection.execute_sql("COMMIT") {
+    if let Err(error) = connection.execute_with_budget(&Statement::Commit, &mut budget) {
         change.status = ChangeStatus::Unresolved;
         change.error = Some(error.to_string());
         write_atomic_json(&change_file, &change)?;

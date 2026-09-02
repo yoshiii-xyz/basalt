@@ -255,12 +255,14 @@ call. This bounds the impact described by one plan; larger jobs should be
 split into separately reviewed plans. SQL executed by `query`, direct-mode
 `execute`, `workspace_preview`, and `workspace_apply` also shares a
 1,000,000-unit engine work budget per request. The budget is enforced while
-the engine scans, joins, groups, projects, sorts, or prepares rows, before the
-full result is handed to MCP. It is a deterministic work bound, not a wall
-clock timeout or a byte-precise memory quota. If it is exceeded, the operation
-fails without committing a mutation; narrow the query, add a selective
-predicate or limit, split the write into reviewed plans, or use the CLI for a
-larger intentional job.
+the engine snapshots state, scans, joins, groups, projects, sorts, prepares,
+or commits rows, before the full result is handed to MCP. A unit is roughly a
+scalar plus one 1 KiB chunk of text payload, with extra units for relational
+work; it is a deterministic work bound, not a wall-clock timeout or a
+byte-precise memory quota. If it is exceeded, the operation fails without
+committing a mutation; narrow the query, add a selective predicate or limit,
+split the write into reviewed plans, or use the CLI for a larger intentional
+job.
 
 Workspace exports count live rows before materializing them and reject tables
 over 10,000 rows or 1 MiB of raw content before the MCP response-size check.

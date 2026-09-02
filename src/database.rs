@@ -120,11 +120,20 @@ impl Database {
 
     /// Begin an optimistic snapshot transaction.
     pub fn begin(&self) -> Result<Transaction, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.begin_with_budget(&mut budget)
+    }
+
+    pub(crate) fn begin_with_budget(
+        &self,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<Transaction, DbError> {
         let state_guard = self
             .inner
             .state
             .read()
             .map_err(|_| dberr(DbErrorKind::Transaction, "database state lock poisoned"))?;
+        budget.state_clone(&state_guard, "starting a database snapshot")?;
         // The generation is published while the write lock is held. Reading
         // it under the same read guard keeps the cloned state and its
         // snapshot number from crossing a concurrent commit.
@@ -166,17 +175,17 @@ impl Database {
     ) -> Result<StatementResult, DbError> {
         match stmt {
             Statement::Checkpoint => {
-                self.checkpoint()?;
+                self.checkpoint_with_budget(budget)?;
                 Ok(StatementResult::Checkpoint)
             }
             Statement::Begin => Ok(StatementResult::Begin),
             Statement::Commit => Ok(StatementResult::Commit),
             Statement::Rollback => Ok(StatementResult::Rollback),
             _ => {
-                let mut transaction = self.begin()?;
+                let mut transaction = self.begin_with_budget(budget)?;
                 let result = transaction.execute_with_budget(stmt, budget)?;
                 if is_mutation(&result) {
-                    transaction.commit()?;
+                    transaction.commit_with_budget(budget)?;
                 } else {
                     transaction.rollback();
                 }
@@ -201,6 +210,14 @@ impl Database {
     /// Flush the current state into the page file and clear committed WAL
     /// frames.  Checkpointing is safe while readers are active.
     pub fn checkpoint(&self) -> Result<(), DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.checkpoint_with_budget(&mut budget)
+    }
+
+    pub(crate) fn checkpoint_with_budget(
+        &self,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<(), DbError> {
         let _commit = self
             .inner
             .commit_lock
@@ -213,8 +230,9 @@ impl Database {
             .inner
             .state
             .read()
-            .map_err(|_| dberr(DbErrorKind::Transaction, "database state lock poisoned"))?
-            .clone();
+            .map_err(|_| dberr(DbErrorKind::Transaction, "database state lock poisoned"))?;
+        budget.state_clone(&state, "preparing a database checkpoint")?;
+        let state = state.clone();
         let generation = self.inner.generation.load(Ordering::Acquire);
         storage::write_snapshot(path, &state, generation)?;
         if let Some(wal_path) = &self.inner.wal_path {
@@ -322,7 +340,7 @@ impl Connection {
                         "cannot checkpoint while a transaction is active",
                     ));
                 }
-                self.db.checkpoint()?;
+                self.db.checkpoint_with_budget(budget)?;
                 Ok(StatementResult::Checkpoint)
             }
             Statement::Begin => {
@@ -332,14 +350,14 @@ impl Connection {
                         "transaction already active",
                     ));
                 }
-                self.transaction = Some(self.db.begin()?);
+                self.transaction = Some(self.db.begin_with_budget(budget)?);
                 Ok(StatementResult::Begin)
             }
             Statement::Commit => {
                 let Some(transaction) = self.transaction.take() else {
                     return Err(dberr(DbErrorKind::Transaction, "no transaction is active"));
                 };
-                transaction.commit()?;
+                transaction.commit_with_budget(budget)?;
                 Ok(StatementResult::Commit)
             }
             Statement::Rollback => {
@@ -369,7 +387,7 @@ impl Connection {
         self.execute_sql_using_budget(sql, &mut budget)
     }
 
-    fn execute_sql_using_budget(
+    pub(crate) fn execute_sql_using_budget(
         &mut self,
         sql: &str,
         budget: &mut crate::engine::ExecutionBudget,
@@ -461,7 +479,15 @@ impl Transaction {
         Ok(results)
     }
 
-    pub fn commit(mut self) -> Result<u64, DbError> {
+    pub fn commit(self) -> Result<u64, DbError> {
+        let mut budget = crate::engine::ExecutionBudget::unlimited();
+        self.commit_with_budget(&mut budget)
+    }
+
+    pub(crate) fn commit_with_budget(
+        mut self,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<u64, DbError> {
         if !self.active {
             return Err(dberr(DbErrorKind::Transaction, "transaction is closed"));
         }
@@ -469,6 +495,7 @@ impl Transaction {
         if !self.dirty {
             return Ok(self.db.generation());
         }
+        budget.state_clone(&self.state, "preparing a database commit")?;
         self.db.commit_state(self.state, self.base_generation)
     }
 
@@ -633,6 +660,35 @@ mod tests {
         b.execute_sql("INSERT INTO t VALUES (2)").unwrap();
         a.commit().unwrap();
         assert!(b.commit().is_err());
+    }
+
+    #[test]
+    fn bounded_sql_accounts_for_snapshot_and_keeps_failed_mutations_unpublished() {
+        let database = Database::in_memory();
+        database
+            .execute_sql("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1)")
+            .unwrap();
+
+        let error = database
+            .execute_sql_with_budget("INSERT INTO t VALUES (2)", 5)
+            .unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        assert_eq!(database.row_count("t").unwrap(), 1);
+    }
+
+    #[test]
+    fn bounded_commit_rejects_before_publishing_its_snapshot() {
+        let database = Database::in_memory();
+        database.execute_sql("CREATE TABLE t (id INTEGER)").unwrap();
+        let mut transaction = database.begin().unwrap();
+        transaction.execute_sql("INSERT INTO t VALUES (1)").unwrap();
+        let mut budget = crate::engine::ExecutionBudget::bounded(0);
+
+        let error = transaction.commit_with_budget(&mut budget).unwrap_err();
+
+        assert_eq!(error.kind, DbErrorKind::Limit);
+        assert_eq!(database.row_count("t").unwrap(), 0);
     }
 
     #[test]
