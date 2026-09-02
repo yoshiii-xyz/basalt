@@ -31,6 +31,7 @@ run_check() {
 }
 
 run_check git diff --check
+run_check python3 scripts/verify-registry-metadata.py
 run_check cargo fmt --all -- --check
 run_check cargo check --all-targets --locked
 run_check cargo clippy --all-targets --all-features --locked -- -D warnings

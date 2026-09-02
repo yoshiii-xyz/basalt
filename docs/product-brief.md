@@ -304,11 +304,10 @@ The switching release must be usable without Rust:
 
 The official registry currently documents multiple package types, including
 Cargo and MCPB, but it is still in preview and stores installation metadata
-rather than artifacts.
-Basalt will publish registry metadata only after `basalt-db` is on crates.io
-and the checksummed binary release exists. The Cargo package will need a
-visible `mcp-name:` marker in the rendered README for registry ownership
-verification; adding that marker before publication would be misleading.
+rather than artifacts. Basalt's release candidate now carries a checked-in
+`server.json` and the visible Cargo ownership marker required for the planned
+`io.github.joshiii-xyz/basalt` listing. Basalt will publish that metadata only
+after `basalt-db` is on crates.io and the checksummed binary release exists.
 
 ## Finite implementation plan
 

@@ -182,6 +182,11 @@ and executes only after the host retries with an explicit approval. Legacy
 initialized hosts receive `elicitation/create`; hosts that do not advertise
 elicitation use the explicit `--allow-writes` startup policy.
 
+The release candidate carries the visible Cargo ownership marker required for
+the future MCP Registry listing:
+
+- MCP Registry ownership marker: mcp-name: io.github.joshiii-xyz/basalt
+
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
 `workspace_preview`, `workspace_plan`, `workspace_apply`,
 `workspace_history`, `workspace_diff`, `workspace_undo`, and

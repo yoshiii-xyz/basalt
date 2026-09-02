@@ -74,14 +74,12 @@ artifact matrix remains the source of truth for the published architectures.
 
 The MCP Registry is a separate metadata publication. Its current preview
 supports multiple package types, including Cargo and MCPB, but does not host
-the artifacts themselves;
-publish `server.json` only after the crates.io package and GitHub release are
-available. Cargo registry ownership verification also requires a visible
-`mcp-name:` marker in the rendered package README. The planned server name is
-`io.github.joshiii-xyz/basalt`. The current candidate intentionally does not
-contain that marker; add it in the release-preparation commit, rerun the full
-preflight, and publish that exact package before creating the Registry entry.
-Do not publish Registry metadata for a package that has not been released.
+the artifacts themselves. The release candidate contains `server.json` and a
+visible `mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The
+metadata verifier checks that both version fields match the Cargo package and
+that the package launches the `mcp` subcommand. Publish `server.json` only
+after the crates.io package and GitHub release are available; do not publish
+Registry metadata for an unreleased package.
 
 ## Publication steps
 

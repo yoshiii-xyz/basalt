@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added checked-in MCP Registry metadata and a release check that keeps its
+  Cargo package, version, launch argument, repository, and ownership marker
+  synchronized without publishing anything automatically.
 - Made CLI workspace imports share the durable recovery ledger with MCP imports;
   CSV, JSON, JSON Lines, and SQL dump imports now return a change ID and can be
   inspected or undone as the latest workspace change.
