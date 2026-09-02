@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
 struct TempDir {
     path: PathBuf,
 }
+
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl TempDir {
     fn new() -> Self {
@@ -15,7 +18,7 @@ impl TempDir {
             std::process::id(),
             unique_suffix()
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         Self { path }
     }
 
@@ -689,8 +692,10 @@ fn rejects_symlinked_history_directory() {
 }
 
 fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
+    let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
+    timestamp * 1_000_000 + sequence
 }

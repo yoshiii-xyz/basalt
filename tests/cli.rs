@@ -1,11 +1,14 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use basalt::Database;
 
 struct TempDir {
     path: std::path::PathBuf,
 }
+
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl TempDir {
     fn new(label: &str) -> Self {
@@ -14,7 +17,7 @@ impl TempDir {
             std::process::id(),
             unique_suffix()
         ));
-        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
         Self { path }
     }
 
@@ -153,8 +156,10 @@ fn durable_database_is_exclusive_across_processes() {
 }
 
 fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
+    let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
+    timestamp * 1_000_000 + sequence
 }

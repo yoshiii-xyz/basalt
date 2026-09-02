@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -11,6 +12,8 @@ struct TempDir {
     path: PathBuf,
 }
 
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
@@ -18,7 +21,7 @@ impl TempDir {
             std::process::id(),
             unique_suffix()
         ));
-        fs::create_dir_all(&path).expect("temporary directory should be created");
+        fs::create_dir(&path).expect("temporary directory should be created");
         Self { path }
     }
 
@@ -1178,8 +1181,10 @@ fn path_arg(path: &Path) -> &str {
 }
 
 fn unique_suffix() -> u128 {
-    SystemTime::now()
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after the Unix epoch")
-        .as_nanos()
+        .as_nanos();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
+    timestamp * 1_000_000 + sequence
 }

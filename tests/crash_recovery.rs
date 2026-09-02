@@ -1,7 +1,10 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use basalt::{Database, db::StatementResult};
+
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn abrupt_process_exit_recovers_the_wal_commit() {
@@ -10,7 +13,7 @@ fn abrupt_process_exit_recovers_the_wal_commit() {
         std::process::id(),
         unique_suffix()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(&dir).unwrap();
     let path = dir.join("main.db");
     let mut child = Command::new(env!("CARGO_BIN_EXE_basalt"))
         .args(["--crash-test-writer", path.to_str().unwrap()])
@@ -44,8 +47,10 @@ fn abrupt_process_exit_recovers_the_wal_commit() {
 }
 
 fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
+    let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
+    timestamp * 1_000_000 + sequence
 }
