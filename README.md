@@ -172,9 +172,10 @@ configuration; running from a checkout is also possible with `cargo run --quiet
 -- mcp --workspace /absolute/path/to/project-data`.
 
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
-`workspace_preview`, `workspace_apply`, `workspace_history`, `workspace_diff`,
-`workspace_undo`, and `workspace_export`, alongside bounded `query`,
-`list_tables`, and `describe_table` tools. It also exposes the current schema at
+`workspace_preview`, `workspace_plan`, `workspace_apply`,
+`workspace_history`, `workspace_diff`, `workspace_undo`, and
+`workspace_export`, alongside bounded `query`, `list_tables`, and
+`describe_table` tools. It also exposes the current schema at
 `basalt://schema`. See [docs/mcp.md](docs/mcp.md) for the complete tool
 contract, configuration details, approval boundary, and troubleshooting.
 
