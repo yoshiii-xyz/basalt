@@ -48,8 +48,8 @@ The published package is named `basalt-db`; the installed command remains
 
 Tagged releases include checksummed installers and prebuilt binaries for Linux,
 macOS, and Windows. See [GitHub Releases](https://github.com/joshiii-xyz/basalt/releases)
-for the currently available no-toolchain install, or use the installer when a
-release provides it:
+for the current no-toolchain install. The `v0.1.1` release has been verified
+from its published installer and its checksums:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joshiii-xyz/basalt/releases/latest/download/basalt-db-installer.sh | sh
@@ -185,6 +185,7 @@ The release metadata carries the visible Cargo ownership marker used by the
 MCP Registry listing:
 
 - MCP Registry ownership marker: mcp-name: io.github.joshiii-xyz/basalt
+- Published listing: [io.github.joshiii-xyz/basalt](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt)
 
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
 `workspace_preview`, `workspace_plan`, `workspace_apply`,

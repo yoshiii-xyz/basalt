@@ -65,8 +65,9 @@ override and archive-verification step after regenerating the generated file.
 
 The package is named `basalt-db` to avoid an existing crates.io name conflict,
 but every archive contains a `basalt` executable. The crate install is
-`cargo install basalt-db --locked`; describe a prebuilt download as available
-only after its GitHub release artifact has actually been published.
+`cargo install basalt-db --locked`; the `v0.1.1` prebuilt download and installer
+are published and have passed the public checksum and isolated consumer smoke
+checks.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles and tests on macOS and Windows runners. The release workflow's
@@ -75,29 +76,31 @@ artifact matrix remains the source of truth for the published architectures.
 The MCP Registry is a separate metadata publication. Its current preview
 supports multiple package types, including Cargo and MCPB, but does not host
 the artifacts themselves. The repository contains `server.json` and a visible
-`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The
-metadata verifier checks that both version fields match the Cargo package and
-that the package launches the `mcp` subcommand. Publish `server.json` only
-after the crates.io package and GitHub release are available; do not publish
-Registry metadata for an unreleased package.
+`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The `v0.1.1`
+metadata is published at the [Basalt Registry listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
+The metadata verifier checks that both version fields match the Cargo package
+and that the package launches the `mcp` subcommand. Publish future metadata
+only after its corresponding crate and GitHub release are available.
 
-## Publication steps
+## Publication steps for future releases
 
-Publication is intentionally manual because it creates external releases. From
-the release commit, run the dry run and publish the package first, then push
-the version tag to start the GitHub release workflow:
+Publication is intentionally manual because it creates external releases. The
+following sequence was completed for `v0.1.1`; replace `VERSION` with a new
+version for a future release. Run the dry run and publish the package first,
+then push the version tag to start the GitHub release workflow:
 
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-git tag -a v0.1.1 -m "Basalt v0.1.1"
-git push origin v0.1.1
+VERSION=0.1.2
+git tag -a "v${VERSION}" -m "Basalt v${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 After the tag workflow succeeds, inspect the GitHub Release assets and their
-checksums, then run the installer and `scripts/smoke-test.sh` from a clean
-machine. Do not change the README's release installer claim until those
-artifacts exist and the clean-machine check passes.
+checksums, then run the installer and `scripts/smoke-test.sh` from an isolated
+consumer environment or clean machine. Do not describe an artifact as
+available until those checks pass.
 
 Once the package and binary release are verified, install the official
 `mcp-publisher` CLI, create or update `server.json` with the same server name
