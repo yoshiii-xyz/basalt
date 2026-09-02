@@ -111,6 +111,24 @@ inspected in history, diffed at table level, and undone when they are the latest
 change. See [docs/workspaces.md](docs/workspaces.md) for the format and
 boundaries.
 
+The reason to use Basalt for agent-owned data is the write boundary: inspect a
+proposed change before it is durable, apply only the exact reviewed plan, then
+diff or undo the latest change if needed.
+
+```bash
+basalt workspace preview --json .basalt-workspace \
+  "UPDATE issues SET status = 'closed' WHERE id = 42"
+# Review the returned plan_id, then:
+basalt workspace apply --json .basalt-workspace PLAN_ID
+# Review the returned change_id, then:
+basalt workspace diff --json .basalt-workspace CHANGE_ID
+basalt workspace undo --json .basalt-workspace CHANGE_ID
+```
+
+Use SQLite or DuckDB when you need their compatibility or analytical
+performance. Basalt is for local structured-data work where a bounded,
+recoverable write matters more than replacing an existing database.
+
 ## MCP server
 
 Basalt can run as a local [Model Context Protocol](https://modelcontextprotocol.io/)
