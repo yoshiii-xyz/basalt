@@ -414,7 +414,9 @@ The release is complete only when all of these are true:
 External adoption is not something the repository can claim on its own. After
 the implementation is complete, the README should invite targeted early users
 and record feedback as evidence rather than presenting the product brief as
-market validation.
+market validation. The [early-user validation guide](early-user-validation.md)
+defines the five-minute task and the evidence to collect; its current state is
+that no external-user results have been collected.
 
 ## Research sources
 

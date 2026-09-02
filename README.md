@@ -132,6 +132,11 @@ Use SQLite or DuckDB when you need their compatibility or analytical
 performance. Basalt is for local structured-data work where a bounded,
 recoverable write matters more than replacing an existing database.
 
+If that describes your workflow, use the [early-user validation
+guide](docs/early-user-validation.md) with a disposable, non-sensitive input
+and record the concrete task and blocker. Basalt does not claim adoption until
+developers complete this workflow against the tools they already use.
+
 ## MCP server
 
 Basalt can run as a local [Model Context Protocol](https://modelcontextprotocol.io/)
