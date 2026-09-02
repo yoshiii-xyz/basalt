@@ -69,8 +69,11 @@ The MCP Registry is a separate metadata publication. Its current preview
 supports Cargo and MCPB packages but does not host the artifacts themselves;
 publish `server.json` only after the crates.io package and GitHub release are
 available. Cargo registry ownership verification also requires a visible
-`mcp-name:` marker in the rendered package README. Do not add or publish that
-marker as part of an unreleased candidate.
+`mcp-name:` marker in the rendered package README. The planned server name is
+`io.github.joshiii-xyz/basalt`. The current candidate intentionally does not
+contain that marker; add it in the release-preparation commit, rerun the full
+preflight, and publish that exact package before creating the Registry entry.
+Do not publish Registry metadata for a package that has not been released.
 
 ## Publication steps
 
@@ -89,6 +92,13 @@ After the tag workflow succeeds, inspect the GitHub Release assets and their
 checksums, then run the installer and `scripts/smoke-test.sh` from a clean
 machine. Do not change the README's release installer claim until those
 artifacts exist and the clean-machine check passes.
+
+Once the package and binary release are verified, install the official
+`mcp-publisher` CLI, create or update `server.json` with the same server name
+and version, authenticate with `mcp-publisher login github`, and publish with
+`mcp-publisher publish`. Verify the result through the Registry API. Registry
+versions are immutable, so treat the metadata as another versioned release
+artifact and rerun validation whenever its version changes.
 
 ## Smoke tests
 
