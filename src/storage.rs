@@ -84,8 +84,32 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
         .map_err(|e| io_error("write snapshot", e))?;
     file.sync_all().map_err(|e| io_error("sync snapshot", e))?;
     drop(file);
-    fs::rename(tmp, path).map_err(|e| io_error("install snapshot", e))?;
+    let install_result = install_snapshot(tmp, path);
+    if install_result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    install_result?;
     sync_parent(path)
+}
+
+#[cfg(not(windows))]
+fn install_snapshot(tmp: &Path, path: &Path) -> Result<(), DbError> {
+    fs::rename(tmp, path).map_err(|e| io_error("install snapshot", e))
+}
+
+#[cfg(windows)]
+fn install_snapshot(tmp: &Path, path: &Path) -> Result<(), DbError> {
+    match fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // Windows does not replace an existing file with rename. The
+            // synced WAL remains the recovery source if the process stops
+            // between removing the old snapshot and installing the new one.
+            fs::remove_file(path).map_err(|e| io_error("replace snapshot", e))?;
+            fs::rename(tmp, path).map_err(|e| io_error("install snapshot", e))
+        }
+        Err(error) => Err(io_error("install snapshot", error)),
+    }
 }
 
 /// Read a snapshot.  A missing file is treated as an empty database.
@@ -236,6 +260,20 @@ mod tests {
         let (loaded, generation) = read_snapshot(&path).unwrap();
         assert!(loaded.tables.is_empty());
         assert_eq!(generation, 7);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rewrites_an_existing_snapshot() {
+        let dir =
+            std::env::temp_dir().join(format!("basalt-storage-rewrite-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db");
+        write_snapshot(&path, &State::empty(), 1).unwrap();
+        write_snapshot(&path, &State::empty(), 2).unwrap();
+        let (_, generation) = read_snapshot(&path).unwrap();
+        assert_eq!(generation, 2);
         let _ = fs::remove_dir_all(dir);
     }
 

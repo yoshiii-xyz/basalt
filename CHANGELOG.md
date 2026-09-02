@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Made durable snapshot replacement work on Windows as well as Unix, and
+  added a regression test for rewriting an existing snapshot.
 - Enforced the MCP execution budget inside the SQL engine so `max_rows` is not
   the only protection against large scans, joins, aggregates, or mutations;
   over-budget operations fail before their state or response is published.

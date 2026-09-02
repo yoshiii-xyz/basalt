@@ -342,8 +342,8 @@ an ingestion script or knowing the internal file layout.
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests
   are implemented and verified locally; hosted CI also checks macOS and Windows
-  compilation. No public release or adoption claim is made until a release is
-  actually published and exercised by external users.
+  compilation and tests. No public release or adoption claim is made until a
+  release is actually published and exercised by external users.
 
 ### Milestone 3 — Reversible state
 

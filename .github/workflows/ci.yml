@@ -82,3 +82,6 @@ jobs:
 
       - name: Check all targets on supported desktop runners
         run: cargo check --all-targets --locked
+
+      - name: Run tests on supported desktop runners
+        run: cargo test --all-targets --locked

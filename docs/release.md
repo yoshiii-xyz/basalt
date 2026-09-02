@@ -69,7 +69,7 @@ install or a prebuilt download as available until that artifact has actually
 been published.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
-and compiles all targets on macOS and Windows runners. The release workflow's
+and compiles and tests on macOS and Windows runners. The release workflow's
 artifact matrix remains the source of truth for the published architectures.
 
 The MCP Registry is a separate metadata publication. Its current preview
