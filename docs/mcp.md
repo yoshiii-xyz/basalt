@@ -219,9 +219,11 @@ silently applies a mutation against a changed base state.
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the
 original receipt when the workspace is still at the recorded post-operation
-state. If later work moved the workspace, Basalt does not replay or discard
-that work. Tool annotations remain hints; the state and identifier checks are
-the enforcement boundary.
+state. A failed import may also be retried when its exact base state is still
+present; unresolved records and moved work are never replayed. If later work
+moved the workspace, Basalt does not replay or discard that work. Tool
+annotations remain hints; the state and identifier checks are the enforcement
+boundary.
 
 `workspace_import` is an explicit atomic ingress operation rather than a raw
 SQL escape hatch. It requires `--allow-writes`, creates a new table, and stores

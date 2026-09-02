@@ -2346,17 +2346,32 @@ pub(crate) fn mcp_import(
     }
 
     let change_id = import_change_id(&base_state, format, table, bytes);
-    if let Some(existing) = changes.iter().find(|change| change.change_id == change_id) {
+    let retry_sequence = if let Some(existing) =
+        changes.iter().find(|change| change.change_id == change_id)
+    {
         if existing.status.is_committed() {
             return Err(WorkspaceError::Invalid(format!(
                 "import has already been committed as change {change_id}"
             )));
         }
-        return Err(WorkspaceError::Invalid(format!(
-            "import already has a history record with status {:?}; inspect workspace_history before retrying",
-            existing.status
-        )));
-    }
+        if existing.status == ChangeStatus::Failed
+            && existing.base_state == base_state
+            && existing.after_state.is_none()
+            && existing
+                .import
+                .as_ref()
+                .is_some_and(|import| import.request_key == request_key)
+        {
+            Some(existing.sequence)
+        } else {
+            return Err(WorkspaceError::Invalid(format!(
+                "import already has a history record with status {:?}; inspect workspace_history before retrying",
+                existing.status
+            )));
+        }
+    } else {
+        None
+    };
 
     let snapshot = snapshot_path(workspace, &change_id);
     if snapshot.exists() {
@@ -2372,7 +2387,7 @@ pub(crate) fn mcp_import(
     let change_file = change_path(workspace, &change_id);
     let mut change = ChangeRecord {
         format_version: FORMAT_VERSION,
-        sequence: next_sequence(&changes)?,
+        sequence: retry_sequence.unwrap_or(next_sequence(&changes)?),
         change_id: change_id.clone(),
         kind: ChangeKind::Apply,
         plan_id: None,
@@ -2394,7 +2409,11 @@ pub(crate) fn mcp_import(
             summary: validated_summary,
         }),
     };
-    write_new_json(&change_file, &change)?;
+    if change_file.exists() {
+        write_atomic_json(&change_file, &change)?;
+    } else {
+        write_new_json(&change_file, &change)?;
+    }
 
     let imported = match format {
         DataFormat::Csv => import_csv(&database, Some(table), bytes),
@@ -3281,5 +3300,77 @@ mod tests {
             json_cell(&serde_json::json!({"nested": true})),
             ImportedCell::Text(value) if value == "{\"nested\":true}"
         ));
+    }
+
+    #[test]
+    fn retries_a_failed_mcp_import_when_the_base_state_is_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-retry-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let content = "id,name\n1,Ada\n";
+        let format = DataFormat::Csv;
+        let table = "users";
+        let database = workspace.database().unwrap();
+        database.checkpoint().unwrap();
+        let base_state = state_fingerprint(&workspace.database_path()).unwrap();
+        let base_generation = database.generation();
+        drop(database);
+
+        ensure_history_dirs(&workspace).unwrap();
+        let change_id = import_change_id(base_state.as_str(), format, table, content.as_bytes());
+        copy_atomic(
+            &workspace.database_path(),
+            &snapshot_path(&workspace, &change_id),
+        )
+        .unwrap();
+        let request_key = import_request_key(format, table, content.as_bytes());
+        let summary = validate_mcp_import(format, table, content.as_bytes()).unwrap();
+        let failed = ChangeRecord {
+            format_version: FORMAT_VERSION,
+            sequence: 1,
+            change_id: change_id.clone(),
+            kind: ChangeKind::Apply,
+            plan_id: None,
+            target_change_id: None,
+            base_generation,
+            base_state: base_state.clone(),
+            expected_state: None,
+            snapshot_id: change_id.clone(),
+            sql: None,
+            status: ChangeStatus::Failed,
+            committed_generation: None,
+            after_state: None,
+            error: Some("transient test failure".to_string()),
+            import: Some(ImportMetadata {
+                request_key,
+                format: format.name().to_string(),
+                table: table.to_string(),
+                bytes: content.len(),
+                summary,
+            }),
+        };
+        write_new_json(&change_path(&workspace, &change_id), &failed).unwrap();
+
+        let report = mcp_import(&workspace, Some(table), format.name(), content).unwrap();
+        assert_eq!(report.change_id, change_id);
+        assert_eq!(report.summary, "table users (1 rows, 2 columns)");
+        let changes = load_changes(&workspace).unwrap();
+        assert_eq!(changes[0].status, ChangeStatus::Committed);
+        assert_eq!(changes[0].sequence, 1);
+
+        let database = workspace.database().unwrap();
+        let rows = database.execute_sql("SELECT id, name FROM users").unwrap();
+        assert!(matches!(
+            &rows[0],
+            StatementResult::Select { rows, .. } if rows.len() == 1
+        ));
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -222,6 +222,8 @@ database-level snapshot diff. The output should state its precision honestly.
 - Exact import, apply, and undo retries return the original receipt only when
   the workspace is still at the recorded post-operation state; moved state is
   rejected rather than replayed.
+- A failed import can be retried only from its unchanged recorded base state;
+  unresolved records are not guessed at or replayed.
 - History and diagnostics never pollute MCP stdout.
 
 MCP annotations are useful host hints, but deterministic controls must live in

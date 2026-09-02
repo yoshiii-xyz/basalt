@@ -101,8 +101,9 @@ data changes for affected tables, not a row-by-row patch.
 Imports, apply, and undo are safe to retry after a lost response. Their
 identifiers and persisted request metadata make an exact retry return the
 original receipt while the workspace is still at the recorded post-operation
-state. If the workspace moved, Basalt rejects the retry instead of replaying
-or discarding later work.
+state. A failed import can be retried when its exact pre-import state is still
+present; unresolved records and moved work are rejected instead of replayed or
+discarded.
 
 Plans, change records, and recovery snapshots live below `history/` and use
 the workspace format version. They are local implementation metadata; the
