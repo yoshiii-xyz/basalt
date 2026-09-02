@@ -37,6 +37,14 @@ fn run(args: &[&str]) -> Output {
         .expect("Basalt should run")
 }
 
+fn run_with_env(args: &[&str], key: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(args)
+        .env(key, "1")
+        .output()
+        .expect("Basalt should run")
+}
+
 fn path_arg(path: &Path) -> &str {
     path.to_str().expect("test paths should be UTF-8")
 }
@@ -226,6 +234,248 @@ fn failed_sql_import_does_not_leave_a_partial_table() {
     ]);
     assert!(!output.status.success());
     assert!(inspect(&workspace)["tables"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn previews_applies_diffs_and_undoes_one_change() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("users.csv");
+    fs::write(&source, "id,name\n1,Ada\n").unwrap();
+    assert!(run(&["init", path_arg(&workspace)]).status.success());
+    assert!(
+        run(&[
+            "workspace",
+            "import",
+            "--table",
+            "users",
+            path_arg(&workspace),
+            path_arg(&source),
+        ])
+        .status
+        .success()
+    );
+
+    let preview = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Grace' WHERE id = 1",
+    ]);
+    assert!(preview.status.success(), "preview failed: {preview:?}");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["mutating_statements"], 1);
+    assert_eq!(preview["statements"][0]["rows_affected"], 1);
+    let plan_id = preview["plan_id"].as_str().unwrap();
+
+    let apply = run(&[
+        "workspace",
+        "apply",
+        "--json",
+        path_arg(&workspace),
+        plan_id,
+    ]);
+    assert!(apply.status.success(), "apply failed: {apply:?}");
+    let apply: Value = serde_json::from_slice(&apply.stdout).unwrap();
+    let change_id = apply["change_id"].as_str().unwrap();
+
+    let query = run(&[
+        "workspace",
+        "query",
+        "--json",
+        path_arg(&workspace),
+        "SELECT name FROM users",
+    ]);
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["rows"][0][0], "Grace");
+
+    let diff = run(&[
+        "workspace",
+        "diff",
+        "--json",
+        path_arg(&workspace),
+        change_id,
+    ]);
+    assert!(diff.status.success(), "diff failed: {diff:?}");
+    let diff: Value = serde_json::from_slice(&diff.stdout).unwrap();
+    assert_eq!(diff["precision"], "table-level logical comparison");
+    assert_eq!(diff["tables"][0]["data_changed"], true);
+
+    let undo = run(&[
+        "workspace",
+        "undo",
+        "--json",
+        path_arg(&workspace),
+        change_id,
+    ]);
+    assert!(undo.status.success(), "undo failed: {undo:?}");
+    let query = run(&[
+        "workspace",
+        "query",
+        "--json",
+        path_arg(&workspace),
+        "SELECT name FROM users",
+    ]);
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["rows"][0][0], "Ada");
+}
+
+#[test]
+fn stale_plans_and_non_latest_undo_are_rejected() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("users.csv");
+    fs::write(&source, "id,name\n1,Ada\n").unwrap();
+    assert!(
+        run(&["workspace", "init", path_arg(&workspace)])
+            .status
+            .success()
+    );
+    assert!(
+        run(&[
+            "workspace",
+            "import",
+            "--table",
+            "users",
+            path_arg(&workspace),
+            path_arg(&source),
+        ])
+        .status
+        .success()
+    );
+    let first = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Grace' WHERE id = 1",
+    ]);
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let first_plan = first["plan_id"].as_str().unwrap();
+    let second = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Linus' WHERE id = 1",
+    ]);
+    let second: Value = serde_json::from_slice(&second.stdout).unwrap();
+    let second_plan = second["plan_id"].as_str().unwrap();
+    let second_apply = run(&[
+        "workspace",
+        "apply",
+        "--json",
+        path_arg(&workspace),
+        second_plan,
+    ]);
+    assert!(second_apply.status.success());
+    let second_apply: Value = serde_json::from_slice(&second_apply.stdout).unwrap();
+    let second_change = second_apply["change_id"].as_str().unwrap();
+
+    let stale = run(&["workspace", "apply", path_arg(&workspace), first_plan]);
+    assert!(!stale.status.success());
+    let third = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Alan' WHERE id = 1",
+    ]);
+    let third: Value = serde_json::from_slice(&third.stdout).unwrap();
+    let third_plan = third["plan_id"].as_str().unwrap();
+    let third_apply = run(&[
+        "workspace",
+        "apply",
+        "--json",
+        path_arg(&workspace),
+        third_plan,
+    ]);
+    assert!(third_apply.status.success());
+    let third_apply: Value = serde_json::from_slice(&third_apply.stdout).unwrap();
+    let third_change = third_apply["change_id"].as_str().unwrap();
+    let old_undo = run(&["workspace", "undo", path_arg(&workspace), second_change]);
+    assert!(!old_undo.status.success());
+    let latest_undo = run(&[
+        "workspace",
+        "undo",
+        "--json",
+        path_arg(&workspace),
+        third_change,
+    ]);
+    assert!(latest_undo.status.success(), "undo failed: {latest_undo:?}");
+}
+
+#[test]
+fn interrupted_apply_and_undo_are_reconciled_after_restart() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("users.csv");
+    fs::write(&source, "id,name\n1,Ada\n").unwrap();
+    assert!(
+        run(&["workspace", "init", path_arg(&workspace)])
+            .status
+            .success()
+    );
+    assert!(
+        run(&[
+            "workspace",
+            "import",
+            "--table",
+            "users",
+            path_arg(&workspace),
+            path_arg(&source),
+        ])
+        .status
+        .success()
+    );
+    let preview = run(&[
+        "workspace",
+        "preview",
+        "--json",
+        path_arg(&workspace),
+        "UPDATE users SET name = 'Grace' WHERE id = 1",
+    ]);
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    let plan_id = preview["plan_id"].as_str().unwrap();
+
+    let crashed_apply = run_with_env(
+        &[
+            "--crash-test-workspace-apply",
+            path_arg(&workspace),
+            plan_id,
+        ],
+        "BASALT_CRASH_TEST_AFTER_APPLY_CHECKPOINT",
+    );
+    assert!(!crashed_apply.status.success());
+    let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
+    assert!(history.status.success(), "history failed: {history:?}");
+    let history: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(history[0]["status"], "recovered");
+    let change_id = history[0]["change_id"].as_str().unwrap();
+
+    let crashed_undo = run_with_env(
+        &[
+            "--crash-test-workspace-undo",
+            path_arg(&workspace),
+            change_id,
+        ],
+        "BASALT_CRASH_TEST_AFTER_UNDO_RESTORE",
+    );
+    assert!(!crashed_undo.status.success());
+    let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
+    let history: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(history[1]["kind"], "undo");
+    assert_eq!(history[1]["status"], "recovered");
+    let query = run(&[
+        "workspace",
+        "query",
+        "--json",
+        path_arg(&workspace),
+        "SELECT name FROM users",
+    ]);
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["rows"][0][0], "Ada");
 }
 
 fn unique_suffix() -> u128 {

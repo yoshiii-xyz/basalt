@@ -21,6 +21,14 @@ fn main() {
         run_workspace(&args);
         return;
     }
+    if args.first().map(String::as_str) == Some("--crash-test-workspace-apply") {
+        crash_test_workspace_apply(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--crash-test-workspace-undo") {
+        crash_test_workspace_undo(&args[1..]);
+        return;
+    }
 
     let options = match cli::parse_args(&args) {
         Ok(options) => options,
@@ -90,6 +98,22 @@ fn run_workspace(args: &[String]) {
         eprintln!("basalt workspace: {error}");
         std::process::exit(error.exit_code());
     }
+}
+
+fn crash_test_workspace_apply(args: &[String]) {
+    if args.len() != 2 {
+        eprintln!("basalt: --crash-test-workspace-apply requires a workspace path and plan ID");
+        std::process::exit(2);
+    }
+    run_workspace(&["apply".to_string(), args[0].clone(), args[1].clone()]);
+}
+
+fn crash_test_workspace_undo(args: &[String]) {
+    if args.len() != 2 {
+        eprintln!("basalt: --crash-test-workspace-undo requires a workspace path and change ID");
+        std::process::exit(2);
+    }
+    run_workspace(&["undo".to_string(), args[0].clone(), args[1].clone()]);
 }
 
 fn open_database(path: &str) -> Result<Database, basalt::db::DbError> {

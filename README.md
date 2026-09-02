@@ -88,9 +88,9 @@ basalt workspace query --json .basalt-workspace "SELECT * FROM issues ORDER BY i
 basalt workspace export .basalt-workspace issues issues.jsonl
 ```
 
-Imports are atomic and exports are deterministic. The workspace directory can
-be copied or inspected with ordinary tools; its current foundation does not
-yet provide preview/apply approval, history, or undo. See
+Imports are atomic and exports are deterministic. Writes can be previewed,
+applied by exact plan ID, inspected in history, diffed at table level, and
+undone when they are the latest change. See
 [docs/workspaces.md](docs/workspaces.md) for the format and boundaries.
 
 ## MCP server

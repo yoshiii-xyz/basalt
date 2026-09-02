@@ -4,7 +4,7 @@
 //! database. Import and export deliberately use common text formats so a
 //! workspace is inspectable and recoverable without Basalt-specific tooling.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use csv::{ReaderBuilder, StringRecord, Writer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use sha2::{Digest, Sha256};
 
 use crate::database::Database;
 use crate::db::{Column, DbError, StatementResult};
@@ -27,13 +28,21 @@ const DATABASE_FILE: &str = "data.basalt";
 const FORMAT_VERSION: u32 = 1;
 const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 const IMPORT_BATCH_SIZE: usize = 256;
+const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
+const MAX_PREVIEW_STATEMENTS: usize = 64;
+const MAX_PREVIEW_ROWS: usize = 10_000;
+const HISTORY_DIR: &str = "history";
+const PLANS_DIR: &str = "plans";
+const CHANGES_DIR: &str = "changes";
+const SNAPSHOTS_DIR: &str = "snapshots";
 
 pub const HELP: &str = "Basalt workspace — local, portable SQL workspaces\n\n\
 Usage:\n  basalt workspace <COMMAND> [OPTIONS]\n\n\
-Commands:\n  init PATH                         Create a workspace\n  inspect [--json] PATH             Show workspace metadata and schema\n  query [OPTIONS] PATH SQL          Run a read-only query\n  import [OPTIONS] WORKSPACE SOURCE Import CSV, JSON, JSONL, or SQL\n  export [OPTIONS] WORKSPACE TABLE OUTPUT\n                                     Export CSV, JSONL, or SQL\n\n\
+Commands:\n  init PATH                         Create a workspace\n  inspect [--json] PATH             Show workspace metadata and schema\n  query [OPTIONS] PATH SQL          Run a read-only query\n  preview [--json] PATH SQL         Preview a write and save its plan\n  apply [--json] PATH PLAN_ID       Apply one exact preview plan\n  history [--json] PATH             List applied and recoverable changes\n  diff [--json] PATH [CHANGE_ID]    Compare a change recovery point\n  undo [--json] PATH CHANGE_ID      Undo the latest change safely\n  import [OPTIONS] WORKSPACE SOURCE Import CSV, JSON, JSONL, or SQL\n  export [OPTIONS] WORKSPACE TABLE OUTPUT\n                                     Export CSV, JSONL, or SQL\n\n\
 Import options:\n  --table NAME                      Table name (required for stdin)\n  --format csv|json|jsonl|sql       Override format inference\n\n\
 Export options:\n  --format csv|jsonl|sql             Override format inference\n\n\
 Query options:\n  --output table|csv|json             Result format (table by default)\n\n\
+State options:\n  --json                             Emit machine-readable JSON\n\n\
 SOURCE and OUTPUT may be '-' for stdin/stdout. File extensions infer formats.\n\
 Imports are atomic. Workspace data stays local and uses a versioned manifest.\n";
 
@@ -286,6 +295,30 @@ enum Command {
         sql: String,
         output: crate::cli::OutputMode,
     },
+    Preview {
+        workspace: PathBuf,
+        sql: String,
+        json: bool,
+    },
+    Apply {
+        workspace: PathBuf,
+        plan_id: String,
+        json: bool,
+    },
+    History {
+        workspace: PathBuf,
+        json: bool,
+    },
+    Diff {
+        workspace: PathBuf,
+        change_id: Option<String>,
+        json: bool,
+    },
+    Undo {
+        workspace: PathBuf,
+        change_id: String,
+        json: bool,
+    },
     Import {
         workspace: PathBuf,
         source: PathBuf,
@@ -358,6 +391,73 @@ pub fn run<R: Read, W: Write>(
             let mut empty_input = io::Cursor::new(Vec::<u8>::new());
             crate::cli::run(&options, database, &mut empty_input, output)
                 .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
+        }
+        Command::Preview {
+            workspace,
+            sql,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)?;
+            let plan = preview_plan(&workspace, &sql)?;
+            if json {
+                let report = PlanReport::from(&plan);
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_plan(&workspace, &plan, output)?;
+            }
+        }
+        Command::Apply {
+            workspace,
+            plan_id,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)?;
+            let report = apply_plan(&workspace, &plan_id)?;
+            if json {
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_apply(&report, output)?;
+            }
+        }
+        Command::History { workspace, json } => {
+            let workspace = Workspace::open(workspace)?;
+            let entries = history(&workspace)?;
+            if json {
+                serde_json::to_writer_pretty(&mut *output, &entries)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_history(&entries, output)?;
+            }
+        }
+        Command::Diff {
+            workspace,
+            change_id,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)?;
+            let report = diff(&workspace, change_id.as_deref())?;
+            if json {
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_diff(&report, output)?;
+            }
+        }
+        Command::Undo {
+            workspace,
+            change_id,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)?;
+            let report = undo(&workspace, &change_id)?;
+            if json {
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_undo(&report, output)?;
+            }
         }
         Command::Import {
             workspace,
@@ -455,6 +555,11 @@ fn parse_command(args: &[String]) -> Result<Command, WorkspaceError> {
         Some("init") => parse_init(&args[1..]),
         Some("inspect") => parse_inspect(&args[1..]),
         Some("query") => parse_query(&args[1..]),
+        Some("preview") => parse_preview(&args[1..]),
+        Some("apply") => parse_apply(&args[1..]),
+        Some("history") => parse_history(&args[1..]),
+        Some("diff") => parse_diff(&args[1..]),
+        Some("undo") => parse_undo(&args[1..]),
         Some("import") => parse_import(&args[1..]),
         Some("export") => parse_export(&args[1..]),
         Some("--help") => Ok(Command::Help),
@@ -556,6 +661,94 @@ fn parse_query_output(value: &str) -> Result<crate::cli::OutputMode, WorkspaceEr
             "unknown query output format {value:?}; expected table, csv, or json"
         ))),
     }
+}
+
+fn parse_json_flagged_command(
+    args: &[String],
+    usage: &str,
+    positionals: std::ops::RangeInclusive<usize>,
+) -> Result<(bool, Vec<String>), WorkspaceError> {
+    let mut json = false;
+    let mut positional = Vec::new();
+    let mut options = true;
+    for arg in args {
+        if options && arg == "--" {
+            options = false;
+        } else if options && arg == "--json" {
+            json = true;
+        } else if options && arg == "--help" {
+            return Err(WorkspaceError::Usage(HELP.to_string()));
+        } else if options && arg.starts_with('-') {
+            return Err(WorkspaceError::Usage(format!("unknown option {arg:?}")));
+        } else {
+            positional.push(arg.clone());
+        }
+    }
+    if !positionals.contains(&positional.len()) {
+        return Err(WorkspaceError::Usage(usage.to_string()));
+    }
+    Ok((json, positional))
+}
+
+fn parse_preview(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) = parse_json_flagged_command(
+        args,
+        "usage: basalt workspace preview [--json] PATH SQL",
+        2..=2,
+    )?;
+    Ok(Command::Preview {
+        workspace: PathBuf::from(&positional[0]),
+        sql: positional[1].clone(),
+        json,
+    })
+}
+
+fn parse_apply(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) = parse_json_flagged_command(
+        args,
+        "usage: basalt workspace apply [--json] PATH PLAN_ID",
+        2..=2,
+    )?;
+    Ok(Command::Apply {
+        workspace: PathBuf::from(&positional[0]),
+        plan_id: positional[1].clone(),
+        json,
+    })
+}
+
+fn parse_history(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) =
+        parse_json_flagged_command(args, "usage: basalt workspace history [--json] PATH", 1..=1)?;
+    Ok(Command::History {
+        workspace: PathBuf::from(&positional[0]),
+        json,
+    })
+}
+
+fn parse_diff(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) = parse_json_flagged_command(
+        args,
+        "usage: basalt workspace diff [--json] PATH [CHANGE_ID]",
+        1..=2,
+    )?;
+    Ok(Command::Diff {
+        workspace: PathBuf::from(&positional[0]),
+        change_id: positional.get(1).cloned(),
+        json,
+    })
+}
+
+fn parse_undo(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) = parse_json_flagged_command(
+        args,
+        "usage: basalt workspace undo [--json] PATH CHANGE_ID",
+        2..=2,
+    )?;
+    Ok(Command::Undo {
+        workspace: PathBuf::from(&positional[0]),
+        change_id: positional[1].clone(),
+        json,
+    })
 }
 
 fn parse_import(args: &[String]) -> Result<Command, WorkspaceError> {
@@ -900,6 +1093,928 @@ fn is_read_only(statement: &Statement) -> bool {
         Statement::Explain(inner) => is_read_only(inner),
         _ => false,
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+enum ChangeKind {
+    #[serde(rename = "apply")]
+    Apply,
+    #[serde(rename = "undo")]
+    Undo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+enum ChangeStatus {
+    #[serde(rename = "prepared")]
+    Prepared,
+    #[serde(rename = "committed")]
+    Committed,
+    #[serde(rename = "recovered")]
+    Recovered,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "unresolved")]
+    Unresolved,
+}
+
+impl ChangeStatus {
+    fn is_committed(&self) -> bool {
+        matches!(self, ChangeStatus::Committed | ChangeStatus::Recovered)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PreviewItem {
+    statement: usize,
+    kind: String,
+    mutating: bool,
+    rows_affected: Option<usize>,
+    rows_returned: Option<usize>,
+    object: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PlanRecord {
+    format_version: u32,
+    plan_id: String,
+    base_generation: u64,
+    base_state: String,
+    sql: String,
+    statements: Vec<PreviewItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlanReport {
+    plan_id: String,
+    base_generation: u64,
+    base_state: String,
+    statement_count: usize,
+    mutating_statements: usize,
+    statements: Vec<PreviewItem>,
+}
+
+impl From<&PlanRecord> for PlanReport {
+    fn from(plan: &PlanRecord) -> Self {
+        Self {
+            plan_id: plan.plan_id.clone(),
+            base_generation: plan.base_generation,
+            base_state: plan.base_state.clone(),
+            statement_count: plan.statements.len(),
+            mutating_statements: plan.statements.iter().filter(|item| item.mutating).count(),
+            statements: plan.statements.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChangeRecord {
+    format_version: u32,
+    sequence: u64,
+    change_id: String,
+    kind: ChangeKind,
+    plan_id: Option<String>,
+    target_change_id: Option<String>,
+    base_generation: u64,
+    base_state: String,
+    expected_state: Option<String>,
+    snapshot_id: String,
+    sql: Option<String>,
+    status: ChangeStatus,
+    committed_generation: Option<u64>,
+    after_state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApplyReport {
+    change_id: String,
+    plan_id: String,
+    base_state: String,
+    after_state: String,
+    generation: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct HistoryEntry {
+    sequence: u64,
+    change_id: String,
+    kind: ChangeKind,
+    status: ChangeStatus,
+    plan_id: Option<String>,
+    target_change_id: Option<String>,
+    base_state: String,
+    after_state: Option<String>,
+    committed_generation: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiffReport {
+    change_id: String,
+    kind: ChangeKind,
+    precision: &'static str,
+    before_state: String,
+    current_state: String,
+    state_changed: bool,
+    tables: Vec<TableDiff>,
+}
+
+#[derive(Debug, Serialize)]
+struct TableDiff {
+    table: String,
+    before_rows: Option<usize>,
+    after_rows: Option<usize>,
+    schema_changed: bool,
+    data_changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UndoReport {
+    change_id: String,
+    undone_change_id: String,
+    restored_state: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TableSnapshot {
+    columns: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
+    if sql.len() > MAX_PREVIEW_BYTES {
+        return Err(WorkspaceError::Invalid(format!(
+            "SQL exceeds the {} MiB preview limit",
+            MAX_PREVIEW_BYTES / (1024 * 1024)
+        )));
+    }
+    let statements = parse(sql).map_err(|error| {
+        WorkspaceError::Invalid(format!(
+            "preview parse error at byte {}: {}",
+            error.offset, error.message
+        ))
+    })?;
+    if statements.is_empty() {
+        return Err(WorkspaceError::Invalid(
+            "preview requires at least one SQL statement".to_string(),
+        ));
+    }
+    if statements.len() > MAX_PREVIEW_STATEMENTS {
+        return Err(WorkspaceError::Invalid(format!(
+            "preview accepts at most {MAX_PREVIEW_STATEMENTS} statements"
+        )));
+    }
+    if statements.iter().any(statement_contains_control) {
+        return Err(WorkspaceError::Invalid(
+            "preview SQL must not contain BEGIN, COMMIT, ROLLBACK, or CHECKPOINT".to_string(),
+        ));
+    }
+    if !statements.iter().any(is_mutation_statement) {
+        return Err(WorkspaceError::Invalid(
+            "preview requires at least one mutating statement".to_string(),
+        ));
+    }
+
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let base_generation = database.generation();
+    let base_state = state_fingerprint(&workspace.database_path())?;
+    let mut transaction = database.begin()?;
+    let result = (|| {
+        let mut items = Vec::with_capacity(statements.len());
+        for (index, statement) in statements.iter().enumerate() {
+            let result = transaction.execute(statement)?;
+            if let StatementResult::Select { rows, .. } = &result
+                && rows.len() > MAX_PREVIEW_ROWS
+            {
+                return Err(WorkspaceError::Invalid(format!(
+                    "preview query result exceeds the {MAX_PREVIEW_ROWS}-row limit"
+                )));
+            }
+            items.push(preview_item(index + 1, &result));
+        }
+        Ok::<Vec<PreviewItem>, WorkspaceError>(items)
+    })();
+    transaction.rollback();
+    let preview_items = result?;
+    let plan_id = plan_id_for(&base_state, sql);
+    let plan = PlanRecord {
+        format_version: FORMAT_VERSION,
+        plan_id,
+        base_generation,
+        base_state,
+        sql: sql.to_string(),
+        statements: preview_items,
+    };
+    ensure_history_dirs(workspace)?;
+    let path = plan_path(workspace, &plan.plan_id);
+    if path.exists() {
+        let existing: PlanRecord = read_json(&path)?;
+        if existing != plan {
+            return Err(WorkspaceError::Invalid(
+                "plan identifier collision; refusing to replace an existing plan".to_string(),
+            ));
+        }
+    } else {
+        write_new_json(&path, &plan)?;
+    }
+    Ok(plan)
+}
+
+fn preview_item(statement: usize, result: &StatementResult) -> PreviewItem {
+    let (kind, mutating, rows_affected, rows_returned, object) = match result {
+        StatementResult::Select { rows, .. } => ("select", false, None, Some(rows.len()), None),
+        StatementResult::Insert { rows_affected } => {
+            ("insert", true, Some(*rows_affected), None, None)
+        }
+        StatementResult::Update { rows_affected } => {
+            ("update", true, Some(*rows_affected), None, None)
+        }
+        StatementResult::Delete { rows_affected } => {
+            ("delete", true, Some(*rows_affected), None, None)
+        }
+        StatementResult::CreateTable { name } => {
+            ("create_table", true, None, None, Some(name.clone()))
+        }
+        StatementResult::DropTable { name } => ("drop_table", true, None, None, Some(name.clone())),
+        StatementResult::CreateIndex { name, .. } => {
+            ("create_index", true, None, None, Some(name.clone()))
+        }
+        StatementResult::DropIndex { name } => ("drop_index", true, None, None, Some(name.clone())),
+        StatementResult::Explain(_) => ("explain", false, None, None, None),
+        StatementResult::Begin => ("begin", false, None, None, None),
+        StatementResult::Commit => ("commit", false, None, None, None),
+        StatementResult::Rollback => ("rollback", false, None, None, None),
+        StatementResult::Checkpoint => ("checkpoint", false, None, None, None),
+        StatementResult::Echo(_) => ("echo", false, None, None, None),
+    };
+    PreviewItem {
+        statement,
+        kind: kind.to_string(),
+        mutating,
+        rows_affected,
+        rows_returned,
+        object,
+    }
+}
+
+fn is_mutation_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::CreateTable { .. }
+            | Statement::DropTable { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::DropIndex { .. }
+            | Statement::Insert { .. }
+            | Statement::InsertSelect { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+    )
+}
+
+fn ensure_history_dirs(workspace: &Workspace) -> Result<(), WorkspaceError> {
+    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(PLANS_DIR))?;
+    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(CHANGES_DIR))?;
+    fs::create_dir_all(workspace.root.join(HISTORY_DIR).join(SNAPSHOTS_DIR))?;
+    Ok(())
+}
+
+fn valid_id(id: &str) -> Result<(), WorkspaceError> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WorkspaceError::Invalid(
+            "identifier must be a 64-character hexadecimal value".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn plan_path(workspace: &Workspace, plan_id: &str) -> PathBuf {
+    workspace
+        .root
+        .join(HISTORY_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{plan_id}.json"))
+}
+
+fn change_path(workspace: &Workspace, change_id: &str) -> PathBuf {
+    workspace
+        .root
+        .join(HISTORY_DIR)
+        .join(CHANGES_DIR)
+        .join(format!("{change_id}.json"))
+}
+
+fn snapshot_path(workspace: &Workspace, snapshot_id: &str) -> PathBuf {
+    workspace
+        .root
+        .join(HISTORY_DIR)
+        .join(SNAPSHOTS_DIR)
+        .join(format!("{snapshot_id}.basalt"))
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkspaceError> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn write_new_json<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkspaceError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_new_file(path, &bytes)
+}
+
+fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkspaceError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    atomic_write_file(path, &bytes)
+}
+
+fn state_fingerprint(path: &Path) -> Result<String, WorkspaceError> {
+    Ok(format!("sha256:{}", sha256_bytes(&fs::read(path)?)))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn plan_id_for(base_state: &str, sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-plan-v1\0");
+    hasher.update(base_state.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(sql.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn apply_change_id(plan_id: &str, base_state: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-apply-v1\0");
+    hasher.update(plan_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(base_state.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn undo_change_id(change_id: &str, base_state: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-undo-v1\0");
+    hasher.update(change_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(base_state.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn next_sequence(changes: &[ChangeRecord]) -> Result<u64, WorkspaceError> {
+    changes
+        .iter()
+        .map(|change| change.sequence)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| WorkspaceError::Invalid("change sequence exhausted".to_string()))
+}
+
+fn copy_atomic(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+    let bytes = fs::read(source)?;
+    atomic_write_file(destination, &bytes)
+}
+
+fn truncate_wal(database_path: &Path) -> Result<(), WorkspaceError> {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(".wal");
+    let file = File::create(PathBuf::from(path))?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, WorkspaceError> {
+    valid_id(plan_id)?;
+    let path = plan_path(workspace, plan_id);
+    if !path.is_file() {
+        return Err(WorkspaceError::Invalid(format!(
+            "plan does not exist: {plan_id}"
+        )));
+    }
+    let plan: PlanRecord = read_json(&path)?;
+    if plan.format_version != FORMAT_VERSION
+        || plan.plan_id != plan_id
+        || plan_id_for(&plan.base_state, &plan.sql) != plan.plan_id
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "plan is invalid or has been modified: {plan_id}"
+        )));
+    }
+    Ok(plan)
+}
+
+fn load_changes(workspace: &Workspace) -> Result<Vec<ChangeRecord>, WorkspaceError> {
+    let directory = workspace.root.join(HISTORY_DIR).join(CHANGES_DIR);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut changes = Vec::new();
+    for entry in fs::read_dir(&directory)? {
+        let path = entry?.path();
+        if path.extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        let change: ChangeRecord = read_json(&path)?;
+        valid_id(&change.change_id)?;
+        if path.file_stem() != Some(OsStr::new(&change.change_id)) {
+            return Err(WorkspaceError::Invalid(format!(
+                "change filename does not match its identifier: {}",
+                path.display()
+            )));
+        }
+        if change.format_version != FORMAT_VERSION {
+            return Err(WorkspaceError::Invalid(format!(
+                "unsupported change format in {}",
+                path.display()
+            )));
+        }
+        changes.push(change);
+    }
+    changes.sort_by_key(|change| change.sequence);
+    Ok(changes)
+}
+
+fn reconcile_change(
+    change: &mut ChangeRecord,
+    current_state: &str,
+    current_generation: u64,
+) -> bool {
+    if change.status != ChangeStatus::Prepared {
+        return false;
+    }
+    match change.kind {
+        ChangeKind::Apply => {
+            if current_generation == change.base_generation.saturating_add(1)
+                && current_state != change.base_state
+            {
+                change.status = ChangeStatus::Recovered;
+                change.committed_generation = Some(current_generation);
+                change.after_state = Some(current_state.to_string());
+                change.error =
+                    Some("commit completed before the history record was finalized".to_string());
+            } else if current_generation == change.base_generation
+                && current_state == change.base_state
+            {
+                change.status = ChangeStatus::Failed;
+                change.error =
+                    Some("operation was not observed as committed after interruption".to_string());
+            } else {
+                change.status = ChangeStatus::Unresolved;
+                change.error = Some(
+                    "workspace state does not match either side of the prepared operation"
+                        .to_string(),
+                );
+            }
+        }
+        ChangeKind::Undo => {
+            if change.expected_state.as_deref() == Some(current_state) {
+                change.status = ChangeStatus::Recovered;
+                change.committed_generation = Some(current_generation);
+                change.after_state = Some(current_state.to_string());
+                change.error =
+                    Some("restore completed before the history record was finalized".to_string());
+            } else if current_generation == change.base_generation
+                && current_state == change.base_state
+            {
+                change.status = ChangeStatus::Failed;
+                change.error =
+                    Some("restore was not observed as completed after interruption".to_string());
+            } else {
+                change.status = ChangeStatus::Unresolved;
+                change.error = Some(
+                    "workspace state does not match either side of the prepared restore"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    true
+}
+
+fn reconcile_changes(
+    workspace: &Workspace,
+    changes: &mut [ChangeRecord],
+    current_state: &str,
+    current_generation: u64,
+) -> Result<(), WorkspaceError> {
+    for change in changes {
+        if reconcile_change(change, current_state, current_generation) {
+            write_atomic_json(&change_path(workspace, &change.change_id), change)?;
+        }
+    }
+    Ok(())
+}
+
+fn history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let current_state = state_fingerprint(&workspace.database_path())?;
+    let current_generation = database.generation();
+    let mut changes = load_changes(workspace)?;
+    reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
+    Ok(changes
+        .into_iter()
+        .map(|change| HistoryEntry {
+            sequence: change.sequence,
+            change_id: change.change_id,
+            kind: change.kind,
+            status: change.status,
+            plan_id: change.plan_id,
+            target_change_id: change.target_change_id,
+            base_state: change.base_state,
+            after_state: change.after_state,
+            committed_generation: change.committed_generation,
+            error: change.error,
+        })
+        .collect())
+}
+
+fn latest_committed(changes: &[ChangeRecord]) -> Option<&ChangeRecord> {
+    changes
+        .iter()
+        .filter(|change| change.status.is_committed())
+        .max_by_key(|change| change.sequence)
+}
+
+fn apply_plan(
+    workspace: &Workspace,
+    requested_plan_id: &str,
+) -> Result<ApplyReport, WorkspaceError> {
+    let plan = load_plan(workspace, requested_plan_id)?;
+    if !plan.statements.iter().any(|item| item.mutating) {
+        return Err(WorkspaceError::Invalid(
+            "plan does not contain a mutating statement".to_string(),
+        ));
+    }
+    ensure_history_dirs(workspace)?;
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let current_state = state_fingerprint(&workspace.database_path())?;
+    if current_state != plan.base_state {
+        return Err(WorkspaceError::Invalid(
+            "plan is stale; preview the operation again against the current workspace".to_string(),
+        ));
+    }
+    let change_id = apply_change_id(&plan.plan_id, &plan.base_state);
+    let change_file = change_path(workspace, &change_id);
+    let mut changes = load_changes(workspace)?;
+    if let Some(existing) = changes
+        .iter_mut()
+        .find(|change| change.change_id == change_id)
+    {
+        if reconcile_change(existing, &current_state, database.generation()) {
+            write_atomic_json(&change_file, existing)?;
+        }
+        if existing.status.is_committed() {
+            return Err(WorkspaceError::Invalid(format!(
+                "plan has already been applied as change {change_id}"
+            )));
+        }
+        if existing.status == ChangeStatus::Unresolved {
+            return Err(WorkspaceError::Invalid(format!(
+                "change {change_id} is unresolved; inspect its recovery point before continuing"
+            )));
+        }
+    }
+    let snapshot = snapshot_path(workspace, &change_id);
+    if snapshot.exists() {
+        if state_fingerprint(&snapshot)? != plan.base_state {
+            return Err(WorkspaceError::Invalid(format!(
+                "recovery point for change {change_id} does not match the plan"
+            )));
+        }
+    } else {
+        copy_atomic(&workspace.database_path(), &snapshot)?;
+    }
+    let sequence = changes
+        .iter()
+        .find(|change| change.change_id == change_id)
+        .map(|change| change.sequence)
+        .unwrap_or(next_sequence(&changes)?);
+    let mut change = ChangeRecord {
+        format_version: FORMAT_VERSION,
+        sequence,
+        change_id: change_id.clone(),
+        kind: ChangeKind::Apply,
+        plan_id: Some(plan.plan_id.clone()),
+        target_change_id: None,
+        base_generation: plan.base_generation,
+        base_state: plan.base_state.clone(),
+        expected_state: None,
+        snapshot_id: change_id.clone(),
+        sql: Some(plan.sql.clone()),
+        status: ChangeStatus::Prepared,
+        committed_generation: None,
+        after_state: None,
+        error: None,
+    };
+    if change_file.exists() {
+        write_atomic_json(&change_file, &change)?;
+    } else {
+        write_new_json(&change_file, &change)?;
+    }
+
+    let mut connection = database.connect();
+    if let Err(error) = connection.execute_sql("BEGIN") {
+        change.status = ChangeStatus::Failed;
+        change.error = Some(error.to_string());
+        write_atomic_json(&change_file, &change)?;
+        return Err(error.into());
+    }
+    let execution = connection.execute_sql(&plan.sql);
+    if let Err(error) = execution {
+        let _ = connection.execute_sql("ROLLBACK");
+        change.status = ChangeStatus::Failed;
+        change.error = Some(error.to_string());
+        write_atomic_json(&change_file, &change)?;
+        return Err(error.into());
+    }
+    if let Err(error) = connection.execute_sql("COMMIT") {
+        change.status = ChangeStatus::Unresolved;
+        change.error = Some(error.to_string());
+        write_atomic_json(&change_file, &change)?;
+        return Err(error.into());
+    }
+    drop(connection);
+    if let Err(error) = database.checkpoint() {
+        change.status = ChangeStatus::Unresolved;
+        change.error = Some(format!(
+            "operation committed but checkpoint failed: {error}"
+        ));
+        write_atomic_json(&change_file, &change)?;
+        return Err(error.into());
+    }
+    let after_state = state_fingerprint(&workspace.database_path())?;
+    let generation = database.generation();
+    if std::env::var_os("BASALT_CRASH_TEST_AFTER_APPLY_CHECKPOINT").is_some() {
+        std::process::abort();
+    }
+    change.status = ChangeStatus::Committed;
+    change.committed_generation = Some(generation);
+    change.after_state = Some(after_state.clone());
+    write_atomic_json(&change_file, &change)?;
+    Ok(ApplyReport {
+        change_id,
+        plan_id: plan.plan_id,
+        base_state: plan.base_state,
+        after_state,
+        generation,
+    })
+}
+
+fn diff(
+    workspace: &Workspace,
+    requested_change_id: Option<&str>,
+) -> Result<DiffReport, WorkspaceError> {
+    let mut changes = load_changes(workspace)?;
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let current_state = state_fingerprint(&workspace.database_path())?;
+    let current_generation = database.generation();
+    reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
+    let change = match requested_change_id {
+        Some(change_id) => {
+            valid_id(change_id)?;
+            changes
+                .iter()
+                .find(|change| change.change_id == change_id)
+                .cloned()
+                .ok_or_else(|| {
+                    WorkspaceError::Invalid(format!("change does not exist: {change_id}"))
+                })?
+        }
+        None => latest_committed(&changes)
+            .cloned()
+            .ok_or_else(|| WorkspaceError::Invalid("no committed changes to diff".to_string()))?,
+    };
+    if !change.status.is_committed() {
+        return Err(WorkspaceError::Invalid(format!(
+            "change {} is not committed; status is {:?}",
+            change.change_id, change.status
+        )));
+    }
+    let snapshot = snapshot_path(workspace, &change.snapshot_id);
+    if !snapshot.is_file() {
+        return Err(WorkspaceError::Invalid(format!(
+            "recovery point is missing for change {}",
+            change.change_id
+        )));
+    }
+    let before_database = Database::open(&snapshot)?;
+    let before = logical_snapshot(&before_database)?;
+    let after = logical_snapshot(&database)?;
+    let mut names = BTreeSet::new();
+    names.extend(before.keys().cloned());
+    names.extend(after.keys().cloned());
+    let tables = names
+        .into_iter()
+        .filter_map(|name| {
+            let before_table = before.get(&name);
+            let after_table = after.get(&name);
+            let schema_changed = match (before_table, after_table) {
+                (Some(before), Some(after)) => before.columns != after.columns,
+                (None, None) => false,
+                _ => true,
+            };
+            let data_changed = match (before_table, after_table) {
+                (Some(before), Some(after)) => before.rows != after.rows,
+                (None, None) => false,
+                _ => true,
+            };
+            (schema_changed || data_changed).then(|| TableDiff {
+                table: name,
+                before_rows: before_table.map(|table| table.rows.len()),
+                after_rows: after_table.map(|table| table.rows.len()),
+                schema_changed,
+                data_changed,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(DiffReport {
+        change_id: change.change_id,
+        kind: change.kind,
+        precision: "table-level logical comparison",
+        before_state: change.base_state,
+        current_state,
+        state_changed: !tables.is_empty(),
+        tables,
+    })
+}
+
+fn logical_snapshot(
+    database: &Database,
+) -> Result<BTreeMap<String, TableSnapshot>, WorkspaceError> {
+    let mut tables = BTreeMap::new();
+    for table in database.table_names()? {
+        let (columns, rows) = select_table(database, &table)?;
+        tables.insert(table, TableSnapshot { columns, rows });
+    }
+    Ok(tables)
+}
+
+fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, WorkspaceError> {
+    valid_id(requested_change_id)?;
+    ensure_history_dirs(workspace)?;
+    let mut changes = load_changes(workspace)?;
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let current_state = state_fingerprint(&workspace.database_path())?;
+    let current_generation = database.generation();
+    reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
+    let target = changes
+        .iter()
+        .find(|change| change.change_id == requested_change_id)
+        .cloned()
+        .ok_or_else(|| {
+            WorkspaceError::Invalid(format!("change does not exist: {requested_change_id}"))
+        })?;
+    if !target.status.is_committed() {
+        return Err(WorkspaceError::Invalid(format!(
+            "change {} is not committed; status is {:?}",
+            target.change_id, target.status
+        )));
+    }
+    let latest = latest_committed(&changes).ok_or_else(|| {
+        WorkspaceError::Invalid("there are no committed changes to undo".to_string())
+    })?;
+    if latest.change_id != target.change_id {
+        return Err(WorkspaceError::Invalid(
+            "only the latest committed change can be undone; undo later changes first".to_string(),
+        ));
+    }
+    if target.after_state.as_deref() != Some(current_state.as_str()) {
+        return Err(WorkspaceError::Invalid(
+            "workspace state moved after this change; refusing to discard later work".to_string(),
+        ));
+    }
+    let target_snapshot = snapshot_path(workspace, &target.snapshot_id);
+    if !target_snapshot.is_file() {
+        return Err(WorkspaceError::Invalid(format!(
+            "recovery point is missing for change {}",
+            target.change_id
+        )));
+    }
+    if state_fingerprint(&target_snapshot)? != target.base_state {
+        return Err(WorkspaceError::Invalid(format!(
+            "recovery point for change {} failed integrity verification",
+            target.change_id
+        )));
+    }
+    let undo_id = undo_change_id(&target.change_id, &current_state);
+    let undo_file = change_path(workspace, &undo_id);
+    if let Some(existing) = changes.iter().find(|change| change.change_id == undo_id) {
+        if existing.status.is_committed() {
+            return Err(WorkspaceError::Invalid(format!(
+                "change has already been undone as {undo_id}"
+            )));
+        }
+        if existing.status == ChangeStatus::Unresolved {
+            return Err(WorkspaceError::Invalid(format!(
+                "undo change {undo_id} is unresolved; inspect its recovery point first"
+            )));
+        }
+    }
+    let undo_snapshot = snapshot_path(workspace, &undo_id);
+    if undo_snapshot.exists() {
+        if state_fingerprint(&undo_snapshot)? != current_state {
+            return Err(WorkspaceError::Invalid(format!(
+                "recovery point for undo {undo_id} does not match the current state"
+            )));
+        }
+    } else {
+        copy_atomic(&workspace.database_path(), &undo_snapshot)?;
+    }
+    let sequence = changes
+        .iter()
+        .find(|change| change.change_id == undo_id)
+        .map(|change| change.sequence)
+        .unwrap_or(next_sequence(&changes)?);
+    let mut undo_record = ChangeRecord {
+        format_version: FORMAT_VERSION,
+        sequence,
+        change_id: undo_id.clone(),
+        kind: ChangeKind::Undo,
+        plan_id: None,
+        target_change_id: Some(target.change_id.clone()),
+        base_generation: current_generation,
+        base_state: current_state.clone(),
+        expected_state: Some(target.base_state.clone()),
+        snapshot_id: undo_id.clone(),
+        sql: None,
+        status: ChangeStatus::Prepared,
+        committed_generation: None,
+        after_state: None,
+        error: None,
+    };
+    if undo_file.exists() {
+        write_atomic_json(&undo_file, &undo_record)?;
+    } else {
+        write_new_json(&undo_file, &undo_record)?;
+    }
+    let database_path = workspace.database_path();
+    drop(database);
+    if let Err(error) = truncate_wal(&database_path) {
+        undo_record.status = ChangeStatus::Unresolved;
+        undo_record.error = Some(error.to_string());
+        write_atomic_json(&undo_file, &undo_record)?;
+        return Err(error);
+    }
+    if let Err(error) = copy_atomic(&target_snapshot, &database_path) {
+        undo_record.status = ChangeStatus::Unresolved;
+        undo_record.error = Some(error.to_string());
+        write_atomic_json(&undo_file, &undo_record)?;
+        return Err(error);
+    }
+    let restored = match Database::open(&database_path) {
+        Ok(database) => database,
+        Err(error) => {
+            undo_record.status = ChangeStatus::Unresolved;
+            undo_record.error = Some(error.to_string());
+            write_atomic_json(&undo_file, &undo_record)?;
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = restored.checkpoint() {
+        undo_record.status = ChangeStatus::Unresolved;
+        undo_record.error = Some(error.to_string());
+        drop(restored);
+        write_atomic_json(&undo_file, &undo_record)?;
+        return Err(error.into());
+    }
+    let restored_state = state_fingerprint(&database_path)?;
+    let restored_generation = restored.generation();
+    if std::env::var_os("BASALT_CRASH_TEST_AFTER_UNDO_RESTORE").is_some() {
+        std::process::abort();
+    }
+    drop(restored);
+    undo_record.status = ChangeStatus::Committed;
+    undo_record.committed_generation = Some(restored_generation);
+    undo_record.after_state = Some(restored_state.clone());
+    write_atomic_json(&undo_file, &undo_record)?;
+    Ok(UndoReport {
+        change_id: undo_id,
+        undone_change_id: target.change_id,
+        restored_state,
+        generation: restored_generation,
+    })
 }
 
 fn required_table(table: Option<&str>) -> Result<&str, WorkspaceError> {
@@ -1381,6 +2496,124 @@ fn render_inspect(report: &InspectReport, output: &mut dyn Write) -> Result<(), 
     Ok(())
 }
 
+fn render_plan(
+    workspace: &Workspace,
+    plan: &PlanRecord,
+    output: &mut dyn Write,
+) -> Result<(), WorkspaceError> {
+    writeln!(output, "Plan: {}", plan.plan_id)?;
+    writeln!(output, "Workspace: {}", workspace.root.display())?;
+    writeln!(output, "Base state: {}", plan.base_state)?;
+    writeln!(output, "Statements: {}", plan.statements.len())?;
+    for item in &plan.statements {
+        let detail = item
+            .rows_affected
+            .map(|rows| format!("{rows} row(s) affected"))
+            .or_else(|| {
+                item.rows_returned
+                    .map(|rows| format!("{rows} row(s) returned"))
+            })
+            .or_else(|| item.object.clone())
+            .unwrap_or_default();
+        if detail.is_empty() {
+            writeln!(output, "- {}: {}", item.statement, item.kind)?;
+        } else {
+            writeln!(output, "- {}: {} ({detail})", item.statement, item.kind)?;
+        }
+    }
+    writeln!(
+        output,
+        "Apply: basalt workspace apply {} {}",
+        workspace.root.display(),
+        plan.plan_id
+    )?;
+    Ok(())
+}
+
+fn render_apply(report: &ApplyReport, output: &mut dyn Write) -> Result<(), WorkspaceError> {
+    writeln!(output, "Applied change {}", report.change_id)?;
+    writeln!(output, "Plan: {}", report.plan_id)?;
+    writeln!(output, "State: {}", report.after_state)?;
+    writeln!(output, "Generation: {}", report.generation)?;
+    Ok(())
+}
+
+fn render_history(entries: &[HistoryEntry], output: &mut dyn Write) -> Result<(), WorkspaceError> {
+    if entries.is_empty() {
+        writeln!(output, "No changes.")?;
+        return Ok(());
+    }
+    for entry in entries {
+        writeln!(
+            output,
+            "#{} {} {} {}",
+            entry.sequence,
+            entry.change_id,
+            change_kind_name(&entry.kind),
+            change_status_name(&entry.status)
+        )?;
+        if let Some(error) = &entry.error {
+            writeln!(output, "  {error}")?;
+        }
+    }
+    Ok(())
+}
+
+fn render_diff(report: &DiffReport, output: &mut dyn Write) -> Result<(), WorkspaceError> {
+    writeln!(output, "Diff for change {}", report.change_id)?;
+    writeln!(output, "Precision: {}", report.precision)?;
+    writeln!(output, "Before: {}", report.before_state)?;
+    writeln!(output, "Current: {}", report.current_state)?;
+    if report.tables.is_empty() {
+        writeln!(output, "No logical table changes.")?;
+        return Ok(());
+    }
+    for table in &report.tables {
+        let before = table
+            .before_rows
+            .map(|rows| rows.to_string())
+            .unwrap_or_else(|| "absent".to_string());
+        let after = table
+            .after_rows
+            .map(|rows| rows.to_string())
+            .unwrap_or_else(|| "absent".to_string());
+        writeln!(
+            output,
+            "- {}: {} -> {} row(s), schema_changed={}, data_changed={}",
+            table.table, before, after, table.schema_changed, table.data_changed
+        )?;
+    }
+    Ok(())
+}
+
+fn render_undo(report: &UndoReport, output: &mut dyn Write) -> Result<(), WorkspaceError> {
+    writeln!(
+        output,
+        "Undid change {} as {}",
+        report.undone_change_id, report.change_id
+    )?;
+    writeln!(output, "Restored state: {}", report.restored_state)?;
+    writeln!(output, "Generation: {}", report.generation)?;
+    Ok(())
+}
+
+fn change_kind_name(kind: &ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Apply => "apply",
+        ChangeKind::Undo => "undo",
+    }
+}
+
+fn change_status_name(status: &ChangeStatus) -> &'static str {
+    match status {
+        ChangeStatus::Prepared => "prepared",
+        ChangeStatus::Committed => "committed",
+        ChangeStatus::Recovered => "recovered",
+        ChangeStatus::Failed => "failed",
+        ChangeStatus::Unresolved => "unresolved",
+    }
+}
+
 fn write_output(
     workspace: &Workspace,
     destination: &Path,
@@ -1404,7 +2637,17 @@ fn write_output(
     {
         fs::create_dir_all(parent)?;
     }
-    let temporary = temporary_path(destination);
+    atomic_write_file(destination, bytes)
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_path(path);
     let write_result = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -1413,11 +2656,11 @@ fn write_output(
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        match fs::rename(&temporary, destination) {
+        match fs::rename(&temporary, path) {
             Ok(()) => Ok(()),
-            Err(error) if destination.exists() => {
-                fs::remove_file(destination)?;
-                fs::rename(&temporary, destination).map_err(|_| error)
+            Err(error) if path.exists() => {
+                fs::remove_file(path)?;
+                fs::rename(&temporary, path).map_err(|_| error)
             }
             Err(error) => Err(error),
         }

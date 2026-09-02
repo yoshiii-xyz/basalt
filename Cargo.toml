@@ -21,6 +21,7 @@ rmcp = { version = "3.2.0", features = ["macros", "schemars", "server", "transpo
 schemars = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tokio = { version = "1", features = ["io-std", "net", "rt-multi-thread", "time"] }
 
 [[bench]]

@@ -72,6 +72,36 @@ The workspace query command accepts only `SELECT` and `EXPLAIN SELECT` and
 uses the existing table, CSV, or JSON Lines result renderers. Mutations stay
 out of this command until the preview/apply lifecycle is available.
 
+## Reversible writes
+
+Preview a mutation before it changes the database:
+
+```bash
+basalt workspace preview --json .basalt-workspace \
+  "UPDATE issues SET status = 'closed' WHERE id = 42"
+```
+
+The returned `plan_id` is derived from the exact SQL and the current database
+state fingerprint. Apply requires that plan ID and refuses a stale plan:
+
+```bash
+basalt workspace apply --json .basalt-workspace PLAN_ID
+basalt workspace history --json .basalt-workspace
+basalt workspace diff --json .basalt-workspace CHANGE_ID
+basalt workspace undo --json .basalt-workspace CHANGE_ID
+```
+
+Apply writes a recovery snapshot before executing the transaction. History
+records are finalized after the database checkpoint; an interrupted finalize
+is surfaced as `recovered` or `unresolved` rather than silently discarded.
+Undo restores only the latest committed change and refuses to remove later
+work. Diffs are honest table-level logical comparisons: they report schema and
+data changes for affected tables, not a row-by-row patch.
+
+Plans, change records, and recovery snapshots live below `history/` and use
+the workspace format version. They are local implementation metadata; the
+database itself remains the single `data.basalt` file.
+
 ## Export
 
 ```bash
@@ -90,7 +120,6 @@ output file.
 ## Current boundary
 
 The workspace foundation provides `init`, `inspect`, read-only `query`,
-`import`, and `export`.
-Preview/apply approval, change history, and undo are intentionally separate
-work so they can be implemented and tested as one complete lifecycle. Do not
-describe the current workspace commands as an undo system yet.
+`preview`, `apply`, `history`, `diff`, `undo`, `import`, and `export`.
+The reversible lifecycle is local and single-process; the workspace-aware MCP
+surface, crash-injection coverage, and release packaging remain separate work.

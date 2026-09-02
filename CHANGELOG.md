@@ -8,6 +8,8 @@
   deterministic CSV, JSON Lines, and SQL exports, with a 64 MiB input limit.
 - Added end-to-end workspace coverage for initialization, type inference,
   reopen, format round trips, and failed-import rollback.
+- Added exact-state write plans, durable recovery points, table-level diffs,
+  change history, and latest-change-only undo for workspaces.
 - Completed the embedded SQL engine, storage, indexes, transactions, WAL
   recovery, planner, and command-line frontend.
 - Added script execution, CSV/JSON-lines output, schema discovery, crash
