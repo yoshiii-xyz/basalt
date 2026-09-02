@@ -29,8 +29,10 @@ contains:
 
 The manifest currently has format version `1` and always names
 `data.basalt`. The database format is Basalt's own format; it is not a SQLite
-file. A durable workspace is owned by one process at a time, just like a
-direct durable database path.
+file. `.workspace.lock` and `data.basalt.lock` are advisory ownership sidecars;
+do not remove or replace them while a workspace or database is open. Stop the
+owner before copying or deleting a workspace. A durable workspace is owned by
+one process at a time, just like a direct durable database path.
 
 ## Import
 
