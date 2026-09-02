@@ -570,6 +570,10 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         1
     );
 
+    writable.close();
+    let mut writable = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut writable);
+
     let saved_plan = writable.request(
         15,
         "tools/call",

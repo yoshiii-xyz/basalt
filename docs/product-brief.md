@@ -1,7 +1,7 @@
 # Basalt product brief
 
 **Status:** Decision record
-**Date:** 2026-09-01
+**Date:** 2026-09-02
 **Scope:** CLI-first local product; no web frontend
 
 ## Decision
@@ -81,6 +81,41 @@ inference and must be validated through a working workflow and external use.
 | Workspace-first MCP projects | MCP tools for workspaces, forks, checkpoints, search, and scoped access are emerging. | Make structured-data preview, impact reporting, and undo the central workflow. |
 | SQLite MCP servers | Easy access to existing SQLite files through schema, query, and execute tools; some now offer read-only defaults, allowlists, and single-binary installs. | Raw SQL access is already available. Basalt must provide deterministic state controls, not just another `query` tool. |
 | Rust embedded stores | `redb`, `fjall`, `sled`, and GlueSQL demonstrate demand for safe Rust storage, SQL layers, portable data, and configurable persistence. | Rust is an implementation advantage, not the user-facing reason to switch. |
+
+### New market evidence (rechecked 2026-09-02)
+
+Several newer products make the competitive boundary sharper:
+
+- Pipetable is a direct local-data runtime for coding agents. It scans folders
+  of CSV, Parquet, JSON, TSV, and Excel files, exposes four read/query MCP
+  tools, uses DuckDB, and offers a native-binary install path. Its stated
+  secure-workspace features—read-only folders, policies, query history, and
+  audit logs—are on its roadmap rather than its current core workflow. Basalt
+  cannot win by being another local file query layer; it can win only where a
+  write needs a durable plan, bounded impact, and verified undo.
+- Coral presents APIs and files as one local, read-only SQL surface, with source
+  specifications, pagination, caching, and agent skills. That validates the
+  value of reducing many data-specific MCP calls to one SQL interface, but it
+  also makes connector breadth an unattractive first fight for Basalt.
+- Dory and Tabularis position human-facing SQL clients as the review surface
+  for agent work. They cover editable SQL workspaces, saved results,
+  visualization, multiple database connections, and desktop installation.
+  Basalt should not grow into a GUI or daily database client to answer that
+  competition; its review surface is the terminal, persisted plan, and
+  machine-readable receipt.
+- TableDI shows that local-first data editing, history, and write-back can be a
+  sellable user concern, but it targets a desktop spreadsheet workflow. That
+  is adjacent evidence for recovery value, not evidence that Basalt should
+  build formulas, dashboards, or an end-user editor.
+
+These are product claims from the projects' current public documentation, not
+independent audits or adoption measurements. The strategic inference is that
+Basalt's first users must care about changing structured data through an agent,
+not merely asking questions about files. If target users only need read/query
+access, Pipetable or DuckDB is the more obvious choice. If they need a GUI,
+Dory, Tabularis, or TableDI is the more obvious choice. Basalt earns a switch
+only when the cost of an accidental or unreviewed data mutation is high enough
+to justify its narrower workflow.
 
 ### Competitive implications
 
@@ -396,6 +431,12 @@ Primary and current sources reviewed for this decision:
 - [MCP Registry](https://modelcontextprotocol.io/registry/about)
 - [MCP Registry package types](https://modelcontextprotocol.io/registry/package-types)
 - [MCP Registry publishing quickstart](https://modelcontextprotocol.io/registry/quickstart)
+- [Pipetable](https://github.com/melihbirim/pipetable)
+- [Pipetable product site](https://pipetable.com/)
+- [Coral](https://github.com/withcoral/coral)
+- [Dory](https://github.com/dorylab/dory)
+- [Tabularis MCP database client](https://tabularis.dev/solutions/mcp-database-client)
+- [TableDI local-first data workspace](https://tabledi.com/)
 - [Claude Code MCP configuration](https://docs.anthropic.com/en/docs/claude-code/mcp)
 - [Cursor MCP configuration](https://docs.cursor.com/context/model-context-protocol)
 - [MCP 2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
