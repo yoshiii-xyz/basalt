@@ -250,8 +250,10 @@ identifier. Apply accepts only the exact previewed operation, creates a
 recovery point, and returns the committed change identifier. Undo restores the
 recovery point without rewriting unrelated history.
 
-The implementation must not claim a row-level diff when it only has a
-database-level snapshot diff. The output should state its precision honestly.
+The implementation must not claim a keyed row-level patch when it only has a
+database snapshot diff. The output reports schema changes and exact
+added/removed row counts from a deterministic row-multiset comparison, and
+states that precision honestly.
 
 ### Safety
 
@@ -328,8 +330,8 @@ an ingestion script or knowing the internal file layout.
   initialization, inspection, CSV/JSON/JSON Lines/SQL imports, deterministic
   exports, reopen behavior, and failed-import rollback.
 - Milestone 3 is complete: exact-state preview/apply plans, durable recovery
-  points, table-level diffs, history, latest-change-only undo, and crash
-  reconciliation are implemented and covered by failure-injection tests.
+  points, schema and row-multiset diffs, history, latest-change-only undo, and
+  crash reconciliation are implemented and covered by failure-injection tests.
 - Milestone 4 is complete: workspace-aware MCP tools are scoped by mode,
   read-only by default, engine-bounded, typed, and covered by stdio wire tests
   for the full ingest-to-undo journey without shelling out. Workspace MCP

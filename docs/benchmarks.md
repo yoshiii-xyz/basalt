@@ -5,7 +5,7 @@ general-purpose database throughput. The benchmark therefore measures one
 representative structured-data workflow:
 
 ```text
-import -> aggregate query -> preview -> apply -> table-level diff -> undo -> export
+import -> aggregate query -> preview -> apply -> row-count diff -> undo -> export
 ```
 
 The fixture has four columns and a configurable number of rows. Each operation

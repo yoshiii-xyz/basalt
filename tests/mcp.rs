@@ -687,7 +687,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
     assert_eq!(
         result(&diff)["structuredContent"]["precision"],
-        "table-level logical comparison"
+        "table schema and row-multiset comparison"
     );
     assert_eq!(result(&diff)["structuredContent"]["state_changed"], true);
 

@@ -1475,6 +1475,8 @@ struct TableDiff {
     table: String,
     before_rows: Option<usize>,
     after_rows: Option<usize>,
+    added_rows: usize,
+    removed_rows: usize,
     schema_changed: bool,
     data_changed: bool,
 }
@@ -2308,15 +2310,19 @@ fn diff_with_row_limit(
                 (None, None) => false,
                 _ => true,
             };
-            let data_changed = match (before_table, after_table) {
-                (Some(before), Some(after)) => before.rows != after.rows,
-                (None, None) => false,
-                _ => true,
+            let (added_rows, removed_rows) = match (before_table, after_table) {
+                (Some(before), Some(after)) => row_delta_counts(&before.rows, &after.rows),
+                (None, Some(after)) => (after.rows.len(), 0),
+                (Some(before), None) => (0, before.rows.len()),
+                (None, None) => (0, 0),
             };
+            let data_changed = added_rows > 0 || removed_rows > 0;
             (schema_changed || data_changed).then(|| TableDiff {
                 table: name,
                 before_rows: before_table.map(|table| table.rows.len()),
                 after_rows: after_table.map(|table| table.rows.len()),
+                added_rows,
+                removed_rows,
                 schema_changed,
                 data_changed,
             })
@@ -2325,12 +2331,61 @@ fn diff_with_row_limit(
     Ok(DiffReport {
         change_id: change.change_id,
         kind: change.kind,
-        precision: "table-level logical comparison",
+        precision: "table schema and row-multiset comparison",
         before_state: change.base_state,
         current_state,
         state_changed: !tables.is_empty(),
         tables,
     })
+}
+
+fn row_delta_counts(before: &[Vec<Value>], after: &[Vec<Value>]) -> (usize, usize) {
+    let mut before_counts = HashMap::<Vec<u8>, usize>::new();
+    for row in before {
+        let key = row_key(row);
+        *before_counts.entry(key).or_default() += 1;
+    }
+    let mut after_counts = HashMap::<Vec<u8>, usize>::new();
+    for row in after {
+        let key = row_key(row);
+        *after_counts.entry(key).or_default() += 1;
+    }
+
+    let removed = before_counts.iter().fold(0usize, |total, (key, count)| {
+        total.saturating_add(count.saturating_sub(after_counts.get(key).copied().unwrap_or(0)))
+    });
+    let added = after_counts.iter().fold(0usize, |total, (key, count)| {
+        total.saturating_add(count.saturating_sub(before_counts.get(key).copied().unwrap_or(0)))
+    });
+    (added, removed)
+}
+
+fn row_key(row: &[Value]) -> Vec<u8> {
+    let mut key = Vec::new();
+    key.extend_from_slice(b"basalt-row-v1\0");
+    for value in row {
+        match value {
+            Value::Null => key.push(0),
+            Value::Integer(value) => {
+                key.push(1);
+                key.extend_from_slice(&value.to_le_bytes());
+            }
+            Value::Real(value) => {
+                key.push(2);
+                key.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            Value::Text(value) => {
+                key.push(3);
+                key.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                key.extend_from_slice(value.as_bytes());
+            }
+            Value::Boolean(value) => {
+                key.push(4);
+                key.push(*value as u8);
+            }
+        }
+    }
+    key
 }
 
 fn logical_snapshot(
@@ -3493,6 +3548,11 @@ fn render_diff(report: &DiffReport, output: &mut dyn Write) -> Result<(), Worksp
             "- {}: {} -> {} row(s), schema_changed={}, data_changed={}",
             table.table, before, after, table.schema_changed, table.data_changed
         )?;
+        writeln!(
+            output,
+            "  rows added: {}, rows removed: {}",
+            table.added_rows, table.removed_rows
+        )?;
     }
     Ok(())
 }
@@ -3886,6 +3946,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("limited to 10000 affected rows"));
+    }
+
+    #[test]
+    fn row_delta_counts_ignore_order_and_preserve_duplicates() {
+        let before = vec![
+            vec![Value::Integer(1), Value::Text("Ada".into())],
+            vec![Value::Integer(2), Value::Text("Grace".into())],
+            vec![Value::Integer(2), Value::Text("Grace".into())],
+        ];
+        let after = vec![
+            vec![Value::Integer(2), Value::Text("Grace".into())],
+            vec![Value::Integer(1), Value::Text("Augusta".into())],
+        ];
+
+        assert_eq!(row_delta_counts(&before, &after), (1, 2));
+        assert_eq!(row_delta_counts(&before, &before), (0, 0));
     }
 
     #[test]

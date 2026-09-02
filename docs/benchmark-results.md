@@ -21,7 +21,7 @@ individual run values as well, so the snapshot can be regenerated or audited.
 | Aggregate query | 26.895 | 3.505 | 4.104 |
 | Preview | 31.768 | 0.515 | 1.108 |
 | Apply | 79.528 | 11.695 | 40.295 |
-| Table-level diff | 48.567 | 23.987 | 27.395 |
+| Diff | 48.567 | 23.987 | 27.395 |
 | Undo | 82.797 | 0.672 | 32.593 |
 | Export | 26.035 | 14.202 | 17.301 |
 
@@ -29,7 +29,9 @@ The process models are intentionally different. Basalt starts a CLI process,
 opens and validates a workspace, and converts output for every operation.
 SQLite and DuckDB remain in one Python process. Their preview is a rolled-back
 transaction and their recovery is a database-file copy, not Basalt's exact plan
-ledger and verified recovery-point workflow. These numbers identify the cost
+ledger and verified recovery-point workflow. Basalt's diff also computes
+deterministic added and removed row counts, while the baselines only compare
+selected rows. These numbers identify the cost
 of the complete workflow and its current bottlenecks; they do not establish
 that Basalt is faster or slower as a general SQL engine.
 

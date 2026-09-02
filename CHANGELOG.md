@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workspace diffs now report exact added and removed row counts using a
+  deterministic row-multiset comparison, while keeping the no-keyed-patch
+  limitation explicit.
 - Made durable snapshot replacement work on Windows as well as Unix, and
   added a regression test for rewriting an existing snapshot.
 - Made workspace inspection use stored live-row counts without scanning table
@@ -58,7 +61,8 @@
   deterministic CSV, JSON Lines, and SQL exports, with a 64 MiB input limit.
 - Added end-to-end workspace coverage for initialization, type inference,
   reopen, format round trips, and failed-import rollback.
-- Added exact-state write plans, durable recovery points, table-level diffs,
+- Added exact-state write plans, durable recovery points, schema and
+  row-multiset diffs,
   change history, and latest-change-only undo for workspaces.
 - Added workspace-aware MCP tools for inspect, preview, apply, history, diff,
   undo, and bounded export. MCP is read-only by default; direct SQL writes,

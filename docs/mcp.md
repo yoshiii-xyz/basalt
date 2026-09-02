@@ -215,7 +215,7 @@ Workspace mode also provides:
 | `workspace_plan` | Reload one persisted plan by ID, including exact SQL and impact metadata | No |
 | `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
 | `workspace_history` | Read the change ledger and recovery statuses | Recovery metadata may be reconciled |
-| `workspace_diff` | Compare a change recovery point with current state; bounded to 10,000 rows across each compared database | Recovery metadata may be reconciled |
+| `workspace_diff` | Compare a change recovery point with current state and report schema plus exact added/removed row counts; bounded to 10,000 rows across each compared database | Recovery metadata may be reconciled |
 | `workspace_undo` | Restore the latest committed change's recovery point | Yes; requires approval |
 | `workspace_export` | Return one table as bounded CSV, JSON Lines, or SQL content | No |
 
@@ -276,7 +276,10 @@ Workspace diffs inspect the logical contents of a recovery point and the
 current database. MCP diffs count live rows before materializing either side,
 inspect at most 10,000 rows in each compared database, and reject larger
 workspaces before building the comparison; use the CLI diff when a complete
-large-workspace comparison is intentional. History and diff may reconcile an
+large-workspace comparison is intentional. The report includes schema changes
+and exact added/removed row counts from a deterministic row-multiset comparison.
+It does not claim keyed row pairing or a row-by-row patch; an update normally
+appears as one removed row and one added row. History and diff may reconcile an
 interrupted operation's metadata, but they do not apply data changes and do not
 require `--allow-writes`. History includes import format, table, byte count,
 and summary when the record came from `workspace_import`; `workspace_plan`

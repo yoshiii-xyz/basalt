@@ -461,8 +461,13 @@ fn previews_applies_diffs_and_undoes_one_change() {
     ]);
     assert!(diff.status.success(), "diff failed: {diff:?}");
     let diff: Value = serde_json::from_slice(&diff.stdout).unwrap();
-    assert_eq!(diff["precision"], "table-level logical comparison");
+    assert_eq!(
+        diff["precision"],
+        "table schema and row-multiset comparison"
+    );
     assert_eq!(diff["tables"][0]["data_changed"], true);
+    assert_eq!(diff["tables"][0]["added_rows"], 1);
+    assert_eq!(diff["tables"][0]["removed_rows"], 1);
 
     let undo = run(&[
         "workspace",

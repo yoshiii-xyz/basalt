@@ -110,8 +110,10 @@ Apply writes a recovery snapshot before executing the transaction. History
 records are finalized after the database checkpoint; an interrupted finalize
 is surfaced as `recovered` or `unresolved` rather than silently discarded.
 Undo restores only the latest committed change and refuses to remove later
-work. Diffs are honest table-level logical comparisons: they report schema and
-data changes for affected tables, not a row-by-row patch.
+work. Diffs report schema changes and exact added/removed row counts from a
+deterministic row-multiset comparison. They do not claim keyed row pairing or a
+row-by-row patch; an update normally appears as one removed row and one added
+row.
 
 Imports, apply, and undo are safe to retry after a lost response. Their
 identifiers and persisted request metadata make an exact retry return the
