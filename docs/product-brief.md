@@ -244,9 +244,9 @@ an ingestion script or knowing the internal file layout.
   full ingest-to-undo journey without shelling out. Workspace MCP imports are
   limited to structured row formats, require explicit writes, and create
   recovery points.
-- Milestone 5 remains open only for publication and hosted release evidence.
-  The incumbent benchmark harness, recorded SQLite/DuckDB snapshot, and first
-  full comparison run are complete;
+- Milestone 5 remains open only for publication and external-user validation.
+  Hosted release evidence is complete: the incumbent benchmark harness,
+  recorded SQLite/DuckDB snapshot, and first full comparison run are complete;
   supported-subset differential checks, compatibility policy, parser and
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests

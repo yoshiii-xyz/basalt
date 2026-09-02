@@ -59,6 +59,24 @@ The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles all targets on macOS and Windows runners. The release workflow's
 artifact matrix remains the source of truth for the published architectures.
 
+## Publication steps
+
+Publication is intentionally manual because it creates external releases. From
+the release commit, run the dry run and publish the package first, then push
+the version tag to start the GitHub release workflow:
+
+```bash
+cargo publish --dry-run --locked
+cargo publish --locked
+git tag -a v0.1.0 -m "Basalt v0.1.0"
+git push origin v0.1.0
+```
+
+After the tag workflow succeeds, inspect the GitHub Release assets and their
+checksums, then run the installer and `scripts/smoke-test.sh` from a clean
+machine. Do not change the README's release installer claim until those
+artifacts exist and the clean-machine check passes.
+
 ## Smoke tests
 
 1. Install the binary from the checkout with `cargo install --path . --locked`
