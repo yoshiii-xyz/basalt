@@ -116,6 +116,17 @@ def main() -> None:
         if not required <= names or "execute" in names:
             raise RuntimeError(f"unexpected workspace tools: {sorted(names)}")
 
+        blocked = subprocess.run(
+            [binary, "workspace", "inspect", str(workspace)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if blocked.returncode == 0 or "workspace is already open" not in blocked.stderr:
+            raise RuntimeError(
+                "an active workspace MCP server did not block a concurrent workspace opener"
+            )
+
         imported = call(
             server,
             3,
