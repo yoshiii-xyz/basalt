@@ -4,15 +4,22 @@
 //! module only owns the database-facing tools, bounded result conversion, and
 //! the small `basalt mcp` command-line parser.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
+use rmcp::handler::server::{
+    router::tool::ToolRouter,
+    tool::{InputResponses as ToolInputResponses, RequestState as ToolRequestState},
+    wrapper::Parameters,
+};
 use rmcp::model::{
-    ElicitRequestParams, ElicitationAction, ElicitationSchema, Implementation, ListResourcesResult,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResponse, CallToolResult, ElicitRequest, ElicitRequestParams, ElicitResult,
+    ElicitationAction, ElicitationSchema, Implementation, InputRequest, InputRequiredResult,
+    InputResponses, ListResourcesResult, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, RequestStateCodec, Resource, ResourceContents, SealOptions,
+    ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{
@@ -20,6 +27,8 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::database::{Connection, Database};
 use crate::db::{Column, StatementResult};
@@ -41,6 +50,9 @@ const MAX_STATEMENTS: usize = 100;
 const MAX_MUTATING_STATEMENTS: usize = 32;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const SCHEMA_URI: &str = "basalt://schema";
+const WRITE_APPROVAL_INPUT_KEY: &str = "basalt_write_approval";
+const WRITE_APPROVAL_STATE_VERSION: u8 = 1;
+const WRITE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Parsed options for the `basalt mcp` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +329,36 @@ struct WriteApproval {
 
 rmcp::elicit_safe!(WriteApproval);
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WriteOperation {
+    Import,
+    Apply,
+    Undo,
+}
+
+impl WriteOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Apply => "apply",
+            Self::Undo => "undo",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WriteApprovalState {
+    version: u8,
+    operation: WriteOperation,
+    identity: String,
+}
+
+enum WorkspaceWriteApproval {
+    Approved,
+    InputRequired(InputRequiredResult),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct DiffInput {
     /// Optional change identifier; defaults to the latest committed change.
@@ -431,6 +473,7 @@ struct BasaltMcp {
     target: McpTarget,
     connection: Arc<Mutex<Connection>>,
     workspace_operation_lock: Arc<Mutex<()>>,
+    request_state_codec: RequestStateCodec,
     allow_writes: bool,
     tool_router: ToolRouter<Self>,
 }
@@ -460,10 +503,16 @@ impl BasaltMcp {
                 tool_router.remove_route(tool);
             }
         }
+        let mut request_state_key = Vec::with_capacity(32);
+        request_state_key.extend_from_slice(Uuid::new_v4().as_bytes());
+        request_state_key.extend_from_slice(Uuid::new_v4().as_bytes());
+        let request_state_codec = RequestStateCodec::try_new(request_state_key)
+            .expect("two UUIDs always provide a sufficiently long request-state key");
         Self {
             target,
             connection: Arc::new(Mutex::new(connection)),
             workspace_operation_lock: Arc::new(Mutex::new(())),
+            request_state_codec,
             allow_writes,
             tool_router,
         }
@@ -714,7 +763,8 @@ impl BasaltMcp {
     /// Import bounded structured-data content into a workspace with recovery.
     #[tool(
         name = "workspace_import",
-        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. Content is limited to 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; clients advertising form elicitation are asked for approval immediately before the import. Use the CLI for SQL dump imports or larger imports.",
+        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. Content is limited to 16 MiB, 10,000 rows, 256 columns, and 1,000,000 cells. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; modern clients advertising form elicitation receive an input_required approval request and retry with the response, while legacy initialized clients receive elicitation/create. Use the CLI for SQL dump imports or larger imports.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<crate::workspace::ImportReport>(),
         annotations(
             title = "Import workspace data",
             read_only_hint = false,
@@ -726,8 +776,10 @@ impl BasaltMcp {
     async fn workspace_import(
         &self,
         Parameters(input): Parameters<WorkspaceImportInput>,
+        ToolInputResponses(input_responses): ToolInputResponses,
+        ToolRequestState(request_state): ToolRequestState,
         context: RequestContext<RoleServer>,
-    ) -> Result<Json<crate::workspace::ImportReport>, String> {
+    ) -> Result<CallToolResponse, String> {
         if !self.allow_writes {
             return Err(
                 "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
@@ -740,16 +792,28 @@ impl BasaltMcp {
                 crate::workspace::MAX_MCP_IMPORT_BYTES / (1024 * 1024)
             ));
         }
-        request_write_approval(
-            &context,
-            format!(
-                "Approve importing {} bytes of {} content into workspace table {:?}?",
-                input.content.len(),
-                input.format,
-                input.table
-            ),
-        )
-        .await?;
+        let identity = write_operation_identity(
+            WriteOperation::Import,
+            &[&input.format, &input.table, &input.content],
+        );
+        if let WorkspaceWriteApproval::InputRequired(result) = self
+            .request_workspace_write_approval(
+                &context,
+                WriteOperation::Import,
+                &identity,
+                format!(
+                    "Approve importing {} bytes of {} content into workspace table {:?}?",
+                    input.content.len(),
+                    input.format,
+                    input.table
+                ),
+                request_state,
+                input_responses,
+            )
+            .await?
+        {
+            return Ok(result.into());
+        }
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -766,7 +830,7 @@ impl BasaltMcp {
         .map_err(|error| format!("workspace import task failed: {error}"))?
         .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace import")?;
-        Ok(Json(response))
+        complete_json(response)
     }
 
     /// Preview a workspace mutation and persist its exact plan.
@@ -832,7 +896,8 @@ impl BasaltMcp {
     /// Apply one exact workspace plan when writes are enabled.
     #[tool(
         name = "workspace_apply",
-        description = "Apply exactly one plan returned by workspace_preview. A workspace MCP plan may affect at most 10,000 rows. Writes are disabled unless the MCP process was started with --allow-writes; clients advertising form elicitation are asked for approval immediately before applying. Stale plans are rejected and a recovery point is created first.",
+        description = "Apply exactly one plan returned by workspace_preview. A workspace MCP plan may affect at most 10,000 rows. Writes are disabled unless the MCP process was started with --allow-writes; modern clients advertising form elicitation receive an input_required approval request and retry with the response, while legacy initialized clients receive elicitation/create. Stale plans are rejected and a recovery point is created first.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<crate::workspace::ApplyReport>(),
         annotations(
             title = "Apply workspace plan",
             read_only_hint = false,
@@ -844,22 +909,33 @@ impl BasaltMcp {
     async fn workspace_apply(
         &self,
         Parameters(input): Parameters<PlanInput>,
+        ToolInputResponses(input_responses): ToolInputResponses,
+        ToolRequestState(request_state): ToolRequestState,
         context: RequestContext<RoleServer>,
-    ) -> Result<Json<crate::workspace::ApplyReport>, String> {
+    ) -> Result<CallToolResponse, String> {
         if !self.allow_writes {
             return Err(
                 "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
                 .to_string(),
             );
         }
-        request_write_approval(
-            &context,
-            format!(
-                "Approve applying Basalt workspace plan {}? Review its exact SQL and impact with workspace_plan first.",
-                input.plan_id
-            ),
-        )
-        .await?;
+        let identity = write_operation_identity(WriteOperation::Apply, &[&input.plan_id]);
+        if let WorkspaceWriteApproval::InputRequired(result) = self
+            .request_workspace_write_approval(
+                &context,
+                WriteOperation::Apply,
+                &identity,
+                format!(
+                    "Approve applying Basalt workspace plan {}? Review its exact SQL and impact with workspace_plan first.",
+                    input.plan_id
+                ),
+                request_state,
+                input_responses,
+            )
+            .await?
+        {
+            return Ok(result.into());
+        }
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -871,7 +947,7 @@ impl BasaltMcp {
         .map_err(|error| format!("workspace apply task failed: {error}"))?
         .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace apply")?;
-        Ok(Json(response))
+        complete_json(response)
     }
 
     /// Return the workspace change ledger.
@@ -936,7 +1012,8 @@ impl BasaltMcp {
     /// Undo the latest committed workspace change when writes are enabled.
     #[tool(
         name = "workspace_undo",
-        description = "Undo the latest committed workspace change by restoring its verified recovery point. Writes are disabled unless --allow-writes is enabled; clients advertising form elicitation are asked for approval immediately before restoring it. Later work is never discarded implicitly.",
+        description = "Undo the latest committed workspace change by restoring its verified recovery point. Writes are disabled unless --allow-writes is enabled; modern clients advertising form elicitation receive an input_required approval request and retry with the response, while legacy initialized clients receive elicitation/create. Later work is never discarded implicitly.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<crate::workspace::UndoReport>(),
         annotations(
             title = "Undo workspace change",
             read_only_hint = false,
@@ -948,22 +1025,33 @@ impl BasaltMcp {
     async fn workspace_undo(
         &self,
         Parameters(input): Parameters<ChangeInput>,
+        ToolInputResponses(input_responses): ToolInputResponses,
+        ToolRequestState(request_state): ToolRequestState,
         context: RequestContext<RoleServer>,
-    ) -> Result<Json<crate::workspace::UndoReport>, String> {
+    ) -> Result<CallToolResponse, String> {
         if !self.allow_writes {
             return Err(
                 "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
                 .to_string(),
             );
         }
-        request_write_approval(
-            &context,
-            format!(
-                "Approve undoing the latest Basalt workspace change {}? Later work is never discarded implicitly.",
-                input.change_id
-            ),
-        )
-        .await?;
+        let identity = write_operation_identity(WriteOperation::Undo, &[&input.change_id]);
+        if let WorkspaceWriteApproval::InputRequired(result) = self
+            .request_workspace_write_approval(
+                &context,
+                WriteOperation::Undo,
+                &identity,
+                format!(
+                    "Approve undoing the latest Basalt workspace change {}? Later work is never discarded implicitly.",
+                    input.change_id
+                ),
+                request_state,
+                input_responses,
+            )
+            .await?
+        {
+            return Ok(result.into());
+        }
         let workspace = self.target.workspace()?;
         let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -975,7 +1063,7 @@ impl BasaltMcp {
         .map_err(|error| format!("workspace undo task failed: {error}"))?
         .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace undo")?;
-        Ok(Json(response))
+        complete_json(response)
     }
 
     /// Export one workspace table as bounded UTF-8 content.
@@ -1013,7 +1101,7 @@ impl BasaltMcp {
 impl ServerHandler for BasaltMcp {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.target.is_workspace() {
-            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, workspace_plan to reload a saved plan after a lost response or restart, and workspace_apply only when writes are explicitly enabled. Clients advertising form elicitation receive a user approval prompt before workspace imports, applies, and undos. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
+            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, workspace_plan to reload a saved plan after a lost response or restart, and workspace_apply only when writes are explicitly enabled. Modern clients advertising form elicitation receive an input_required approval request before workspace imports, applies, and undos; legacy initialized clients receive elicitation/create. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
         } else if self.allow_writes {
             "Basalt direct database mode has write access because --allow-writes was explicitly provided. Use query for read-only SELECT or EXPLAIN SELECT; use execute for writes and transaction control. Results are bounded."
         } else {
@@ -1112,20 +1200,112 @@ async fn execute_sql(
     .map_err(|error| format!("SQL execution task failed: {error}"))?
 }
 
-async fn request_write_approval(
+impl BasaltMcp {
+    async fn request_workspace_write_approval(
+        &self,
+        context: &RequestContext<RoleServer>,
+        operation: WriteOperation,
+        identity: &str,
+        message: String,
+        request_state: Option<String>,
+        input_responses: Option<InputResponses>,
+    ) -> Result<WorkspaceWriteApproval, String> {
+        if !supports_form_elicitation(context) {
+            return Ok(WorkspaceWriteApproval::Approved);
+        }
+        if uses_modern_mcp(context) {
+            return self.request_modern_write_approval(
+                operation,
+                identity,
+                message,
+                request_state,
+                input_responses,
+            );
+        }
+
+        request_legacy_write_approval(context, message).await?;
+        Ok(WorkspaceWriteApproval::Approved)
+    }
+
+    fn request_modern_write_approval(
+        &self,
+        operation: WriteOperation,
+        identity: &str,
+        message: String,
+        request_state: Option<String>,
+        input_responses: Option<InputResponses>,
+    ) -> Result<WorkspaceWriteApproval, String> {
+        match (request_state, input_responses) {
+            (None, None) => Ok(WorkspaceWriteApproval::InputRequired(
+                self.modern_write_approval_request(operation, identity, message)?,
+            )),
+            (None, Some(_)) => Err(
+                "workspace write approval response is missing its request state; repeat the original tool call"
+                    .to_string(),
+            ),
+            (Some(_), None) => Err(
+                "workspace write approval response is missing input responses; repeat the original tool call"
+                    .to_string(),
+            ),
+            (Some(request_state), Some(input_responses)) => {
+                validate_modern_write_approval(
+                    &self.request_state_codec,
+                    operation,
+                    identity,
+                    &request_state,
+                    &input_responses,
+                )?;
+                Ok(WorkspaceWriteApproval::Approved)
+            }
+        }
+    }
+
+    fn modern_write_approval_request(
+        &self,
+        operation: WriteOperation,
+        identity: &str,
+        message: String,
+    ) -> Result<InputRequiredResult, String> {
+        let schema = ElicitationSchema::from_type::<WriteApproval>()
+            .map_err(|error| format!("could not build workspace write approval schema: {error}"))?;
+        let mut input_requests = BTreeMap::new();
+        input_requests.insert(
+            WRITE_APPROVAL_INPUT_KEY.to_string(),
+            InputRequest::Elicitation(ElicitRequest::new(
+                ElicitRequestParams::FormElicitationParams {
+                    meta: None,
+                    message,
+                    requested_schema: schema,
+                },
+            )),
+        );
+        let state = WriteApprovalState {
+            version: WRITE_APPROVAL_STATE_VERSION,
+            operation,
+            identity: identity.to_string(),
+        };
+        let request_state = self
+            .request_state_codec
+            .seal_json_with(
+                &state,
+                &SealOptions::new()
+                    .associated_data(identity.as_bytes())
+                    .ttl(WRITE_APPROVAL_TIMEOUT),
+            )
+            .map_err(|error| format!("could not create workspace write approval state: {error}"))?;
+        Ok(InputRequiredResult::new(
+            Some(input_requests),
+            Some(request_state),
+        ))
+    }
+}
+
+async fn request_legacy_write_approval(
     context: &RequestContext<RoleServer>,
     message: String,
 ) -> Result<(), String> {
-    let supports_form = context
-        .client_capabilities()
-        .and_then(|capabilities| capabilities.elicitation)
-        .is_some_and(|capability| capability.form.is_some() || capability.url.is_none());
-    if !supports_form {
-        return Ok(());
-    }
-
     let schema = ElicitationSchema::from_type::<WriteApproval>()
-        .map_err(|error| format!("could not build write approval prompt: {error}"))?;
+        .map_err(|error| format!("could not build workspace write approval schema: {error}"))?;
     let response = context
         .peer
         .create_elicitation_with_timeout(
@@ -1134,10 +1314,44 @@ async fn request_write_approval(
                 message,
                 requested_schema: schema,
             },
-            Some(std::time::Duration::from_secs(300)),
+            Some(WRITE_APPROVAL_TIMEOUT),
         )
         .await
         .map_err(|error| format!("workspace write approval request failed: {error}"))?;
+    validate_write_approval_response(response)
+}
+
+fn validate_modern_write_approval(
+    codec: &RequestStateCodec,
+    operation: WriteOperation,
+    identity: &str,
+    request_state: &str,
+    input_responses: &InputResponses,
+) -> Result<(), String> {
+    let state = codec
+        .open_json_with::<WriteApprovalState>(request_state, identity.as_bytes())
+        .map_err(|_| {
+            "workspace write approval state is invalid or expired; repeat the original tool call"
+                .to_string()
+        })?;
+    if state.version != WRITE_APPROVAL_STATE_VERSION
+        || state.operation != operation
+        || state.identity != identity
+    {
+        return Err(
+            "workspace write approval does not match this operation; repeat the original tool call"
+                .to_string(),
+        );
+    }
+    let response = input_responses
+        .get(WRITE_APPROVAL_INPUT_KEY)
+        .ok_or_else(|| "workspace write approval response was not provided".to_string())?;
+    let response: ElicitResult = serde_json::from_value(response.clone())
+        .map_err(|error| format!("workspace write approval response was invalid: {error}"))?;
+    validate_write_approval_response(response)
+}
+
+fn validate_write_approval_response(response: ElicitResult) -> Result<(), String> {
     match response.action {
         ElicitationAction::Accept => {
             let content = response.content.ok_or_else(|| {
@@ -1155,6 +1369,36 @@ async fn request_write_approval(
         ElicitationAction::Cancel => Err("workspace write approval was cancelled".to_string()),
         _ => Err("workspace write approval returned an unknown action".to_string()),
     }
+}
+
+fn supports_form_elicitation(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .client_capabilities()
+        .and_then(|capabilities| capabilities.elicitation)
+        .is_some_and(|capability| capability.form.is_some() || capability.url.is_none())
+}
+
+fn uses_modern_mcp(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|version| version.as_str() >= "2026-07-28")
+}
+
+fn write_operation_identity(operation: WriteOperation, parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-mcp-write-approval-v1\0");
+    hasher.update(operation.name().as_bytes());
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn complete_json<T: Serialize>(value: T) -> Result<CallToolResponse, String> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| format!("could not serialize structured tool output: {error}"))?;
+    Ok(CallToolResult::structured(value).into())
 }
 
 async fn execute_workspace_sql(

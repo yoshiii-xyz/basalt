@@ -42,6 +42,7 @@ struct McpProcess {
     output: BufReader<ChildStdout>,
     pending: HashMap<u64, Value>,
     elicitation_requests: usize,
+    mrtr_requests: usize,
     approve_elicitation: bool,
 }
 
@@ -135,6 +136,7 @@ impl McpProcess {
             output,
             pending: HashMap::new(),
             elicitation_requests: 0,
+            mrtr_requests: 0,
             approve_elicitation,
         }
     }
@@ -155,6 +157,48 @@ impl McpProcess {
             "params": params,
         }));
         self.response(id)
+    }
+
+    fn request_with_mrtr(&mut self, id: u64, method: &str, params: Value) -> Value {
+        let mut response = self.request(id, method, params.clone());
+        let mut retry_id = id.checked_add(1_000).expect("retry ID should not overflow");
+        while result(&response)["resultType"] == "input_required" {
+            self.mrtr_requests += 1;
+            let incomplete = result(&response);
+            let requests = incomplete["inputRequests"]
+                .as_object()
+                .expect("MRTR response should contain input requests");
+            assert_eq!(requests.len(), 1);
+            let approval_request = requests
+                .get("basalt_write_approval")
+                .expect("MRTR response should request workspace approval");
+            assert_eq!(approval_request["method"], "elicitation/create");
+            assert_eq!(approval_request["params"]["mode"], "form");
+            let request_state = incomplete["requestState"]
+                .as_str()
+                .expect("MRTR response should contain request state")
+                .to_owned();
+
+            let mut retry_params = params
+                .as_object()
+                .expect("MRTR retry parameters should be an object")
+                .clone();
+            retry_params.insert("requestState".to_string(), Value::String(request_state));
+            retry_params.insert(
+                "inputResponses".to_string(),
+                json!({
+                    "basalt_write_approval": {
+                        "action": "accept",
+                        "content": {"approved": self.approve_elicitation}
+                    }
+                }),
+            );
+            response = self.request(retry_id, method, Value::Object(retry_params));
+            retry_id = retry_id
+                .checked_add(1)
+                .expect("MRTR retry ID should not overflow");
+        }
+        response
     }
 
     fn response(&mut self, id: u64) -> Value {
@@ -221,12 +265,16 @@ fn result(message: &Value) -> &Value {
 }
 
 fn initialize_legacy(server: &mut McpProcess) {
+    initialize_legacy_with_capabilities(server, json!({}));
+}
+
+fn initialize_legacy_with_capabilities(server: &mut McpProcess, capabilities: Value) {
     let response = server.request(
         1,
         "initialize",
         json!({
             "protocolVersion": "2025-11-25",
-            "capabilities": {},
+            "capabilities": capabilities,
             "clientInfo": {"name": "basalt-integration-test", "version": "1.0.0"}
         }),
     );
@@ -417,7 +465,7 @@ fn serves_modern_discovery_requests_with_per_request_metadata() {
 }
 
 #[test]
-fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
+fn workspace_mcp_uses_protocol_appropriate_approval_for_workspace_writes() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
@@ -433,14 +481,14 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
             "version": "1.0.0"
         },
         "io.modelcontextprotocol/clientCapabilities": {
-            "elicitation": {}
+            "elicitation": {"form": {}}
         }
     });
     let mut server = McpProcess::start_with_workspace_approval(&workspace, true, true);
     let discovery = server.request(1, "server/discover", json!({"_meta": metadata.clone()}));
     assert!(result(&discovery)["supportedVersions"].is_array());
 
-    let imported = server.request(
+    let imported = server.request_with_mrtr(
         2,
         "tools/call",
         json!({
@@ -457,7 +505,8 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
         .as_str()
         .expect("import should return a change ID")
         .to_owned();
-    assert_eq!(server.elicitation_requests, 1);
+    assert_eq!(server.mrtr_requests, 1);
+    assert_eq!(server.elicitation_requests, 0);
 
     let preview = server.request(
         3,
@@ -473,8 +522,40 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
         .expect("preview should return a plan ID")
         .to_owned();
 
-    let applied = server.request(
+    let pending_apply = server.request(
         4,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_apply",
+            "arguments": {"plan_id": plan_id.clone()}
+        }),
+    );
+    assert_eq!(result(&pending_apply)["resultType"], "input_required");
+    let request_state = result(&pending_apply)["requestState"]
+        .as_str()
+        .expect("MRTR approval should include request state")
+        .to_owned();
+    let tampered_apply = server.request(
+        1004,
+        "tools/call",
+        json!({
+            "_meta": metadata.clone(),
+            "name": "workspace_apply",
+            "arguments": {"plan_id": "tampered-plan-id"},
+            "requestState": request_state,
+            "inputResponses": {
+                "basalt_write_approval": {
+                    "action": "accept",
+                    "content": {"approved": true}
+                }
+            }
+        }),
+    );
+    assert_eq!(result(&tampered_apply)["isError"], true);
+
+    let applied = server.request_with_mrtr(
+        5,
         "tools/call",
         json!({
             "_meta": metadata.clone(),
@@ -486,10 +567,10 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
         .as_str()
         .expect("apply should return a change ID")
         .to_owned();
-    assert_eq!(server.elicitation_requests, 2);
+    assert_eq!(server.mrtr_requests, 2);
 
-    let undone = server.request(
-        5,
+    let undone = server.request_with_mrtr(
+        6,
         "tools/call",
         json!({
             "_meta": metadata.clone(),
@@ -501,7 +582,7 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
         result(&undone)["structuredContent"]["undone_change_id"],
         change_id
     );
-    assert_eq!(server.elicitation_requests, 3);
+    assert_eq!(server.mrtr_requests, 3);
     assert_ne!(import_change_id, change_id);
     server.close();
 
@@ -527,13 +608,13 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
                     "version": "1.0.0"
                 },
                 "io.modelcontextprotocol/clientCapabilities": {
-                    "elicitation": {}
+                    "elicitation": {"form": {}}
                 }
             }
         }),
     );
     assert!(result(&discovery)["supportedVersions"].is_array());
-    let rejected = declined.request(
+    let rejected = declined.request_with_mrtr(
         2,
         "tools/call",
         json!({
@@ -544,7 +625,7 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
                     "version": "1.0.0"
                 },
                 "io.modelcontextprotocol/clientCapabilities": {
-                    "elicitation": {}
+                    "elicitation": {"form": {}}
                 }
             },
             "name": "workspace_import",
@@ -556,7 +637,8 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
         }),
     );
     assert_eq!(result(&rejected)["isError"], true);
-    assert_eq!(declined.elicitation_requests, 1);
+    assert_eq!(declined.mrtr_requests, 1);
+    assert_eq!(declined.elicitation_requests, 0);
     let inspect = declined.request(
         3,
         "tools/call",
@@ -568,7 +650,7 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
                     "version": "1.0.0"
                 },
                 "io.modelcontextprotocol/clientCapabilities": {
-                    "elicitation": {}
+                    "elicitation": {"form": {}}
                 }
             },
             "name": "workspace_inspect",
@@ -582,6 +664,34 @@ fn workspace_mcp_uses_client_elicitation_for_workspace_writes() {
             .is_empty()
     );
     declined.close();
+
+    let legacy_workspace = temp.path().join("legacy-workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&legacy_workspace)])
+        .output()
+        .expect("legacy workspace init should run");
+    assert!(
+        init.status.success(),
+        "legacy workspace init failed: {init:?}"
+    );
+    let mut legacy = McpProcess::start_with_workspace_approval(&legacy_workspace, true, true);
+    initialize_legacy_with_capabilities(&mut legacy, json!({"elicitation": {}}));
+    let imported = legacy.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert!(result(&imported)["structuredContent"]["change_id"].is_string());
+    assert_eq!(legacy.elicitation_requests, 1);
+    assert_eq!(legacy.mrtr_requests, 0);
+    legacy.close();
 }
 
 #[test]

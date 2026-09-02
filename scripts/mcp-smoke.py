@@ -16,7 +16,7 @@ MODERN_METADATA: dict[str, Any] = {
         "name": "basalt-smoke",
         "version": "1.0.0",
     },
-    "io.modelcontextprotocol/clientCapabilities": {},
+    "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
 }
 
 
@@ -51,6 +51,33 @@ class McpProcess:
             return message["result"]
         raise RuntimeError(f"MCP exited before responding to request {request_id}")
 
+    def request_with_mrtr(
+        self, request_id: int, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = self.request(request_id, method, params)
+        retry_id = request_id + 1000
+        while result.get("resultType") == "input_required":
+            requests = result.get("inputRequests")
+            if not isinstance(requests, dict) or set(requests) != {"basalt_write_approval"}:
+                raise RuntimeError(f"unexpected MRTR input request: {result}")
+            approval = requests["basalt_write_approval"]
+            if not isinstance(approval, dict) or approval.get("method") != "elicitation/create":
+                raise RuntimeError(f"unexpected MRTR request method: {approval}")
+            request_state = result.get("requestState")
+            if not isinstance(request_state, str) or not request_state:
+                raise RuntimeError(f"MRTR response did not include request state: {result}")
+            retry_params = dict(params)
+            retry_params["requestState"] = request_state
+            retry_params["inputResponses"] = {
+                "basalt_write_approval": {
+                    "action": "accept",
+                    "content": {"approved": True},
+                }
+            }
+            result = self.request(retry_id, method, retry_params)
+            retry_id += 1
+        return result
+
     def close(self) -> None:
         if self.process.stdin is not None:
             self.process.stdin.close()
@@ -72,7 +99,7 @@ def call(
     arguments: dict[str, Any],
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    result = server.request(
+    result = server.request_with_mrtr(
         request_id,
         "tools/call",
         {"name": name, "arguments": arguments, "_meta": metadata},
