@@ -246,6 +246,7 @@ calls.
 | src/cli.rs | Interactive and scripted command-line frontend |
 | src/workspace.rs | Local workspace lifecycle and data interchange |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
+| server.json | MCP Registry metadata for the release candidate |
 | docs/sql.md | Supported SQL dialect and transaction semantics |
 | docs/benchmark-results.md | Recorded workflow benchmark snapshot |
 | docs/compatibility.md | File-format boundary and differential-test policy |
@@ -259,6 +260,7 @@ calls.
 | scripts/differential_sql.py | Supported-subset SQLite differential checks |
 | scripts/mcp-smoke.py | Installed-binary writable MCP smoke test |
 | scripts/verify-release-artifacts.py | Release archive checksum and contents check |
+| scripts/verify-registry-metadata.py | MCP Registry package/version consistency check |
 | scripts/release-check.sh | Packaged-crate and release preflight |
 | scripts/smoke-test.sh | Installed-binary CLI and read-only MCP smoke test |
 | fuzz/ | Optional libFuzzer parser and snapshot targets |

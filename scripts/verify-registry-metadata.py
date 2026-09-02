@@ -53,6 +53,8 @@ def package_version() -> str:
 def main() -> int:
     try:
         metadata = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise fail("document must be an object")
         version = package_version()
         if require_string(metadata.get("name"), "name") != EXPECTED_NAME:
             raise fail(f"name must be {EXPECTED_NAME!r}")
