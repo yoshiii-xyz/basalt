@@ -7,6 +7,8 @@
   metadata now advertises those retries as idempotent.
 - Made bounded workspace MCP imports return their original receipt on an exact
   retry after a lost response by persisting an import request fingerprint.
+- Added concise Claude Code and Cursor project configuration paths for the
+  installed workspace MCP server, while keeping server-side writes explicit.
 - Corrected the MCP workspace import annotation to identify it as additive
   rather than destructive, with a wire-level regression check.
 - Added versioned local workspaces with `basalt init`, read-only workspace

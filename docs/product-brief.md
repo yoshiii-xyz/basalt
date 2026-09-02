@@ -377,6 +377,8 @@ Primary and current sources reviewed for this decision:
 - [MCP Registry](https://modelcontextprotocol.io/registry/about)
 - [MCP Registry package types](https://modelcontextprotocol.io/registry/package-types)
 - [MCP Registry publishing quickstart](https://modelcontextprotocol.io/registry/quickstart)
+- [Claude Code MCP configuration](https://docs.anthropic.com/en/docs/claude-code/mcp)
+- [Cursor MCP configuration](https://docs.cursor.com/context/model-context-protocol)
 - [MCP 2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
 - [MCP tool annotation guidance](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
 - [AgentFS rollback request](https://github.com/tursodatabase/agentfs/issues/313)

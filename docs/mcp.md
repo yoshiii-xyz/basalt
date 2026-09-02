@@ -37,6 +37,21 @@ The command requires Rust 1.88 or newer when building from source. If the MCP
 host does not inherit the user's `PATH`, use the absolute path printed by
 `command -v basalt` as the configuration's `command` value.
 
+Claude Code can register a project-scoped server without hand-editing JSON:
+
+```bash
+claude mcp add basalt --scope project -- \
+  basalt mcp --workspace "$PWD/.basalt-workspace"
+```
+
+This writes the project's `.mcp.json`; Claude Code may ask for approval before
+using a project server. Use an absolute binary path when the host does not
+inherit the shell's `PATH`. Keep `--allow-writes` out of shared configuration
+unless the project has an explicit policy for agent imports, applies, and
+undos; add it deliberately when that policy is approved. See the [Claude Code
+MCP reference](https://docs.anthropic.com/en/docs/claude-code/mcp) for host
+scope and registration details.
+
 ## Choose a mode
 
 Use workspace mode for the product's agent workflow. It binds the server to a
@@ -94,6 +109,12 @@ Use the host's MCP server configuration file. The common local-server shape is:
   }
 }
 ```
+
+For Cursor, save the same shape as a project `.cursor/mcp.json`. Cursor's CLI
+also discovers project MCP configuration; its [MCP
+documentation](https://docs.cursor.com/context/model-context-protocol) covers
+the host's approval and auto-run settings. Basalt's `--allow-writes` flag is
+still the server-side boundary and must be enabled separately.
 
 Add `--allow-writes` to a direct database configuration only when unrestricted
 SQL writes are intentionally approved:
