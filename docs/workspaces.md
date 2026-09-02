@@ -90,11 +90,15 @@ accepts at most 64 statements and 32 mutating statements. Review the SQL before
 applying the plan; apply requires that plan ID and refuses a stale plan:
 
 ```bash
+basalt workspace plan --json .basalt-workspace PLAN_ID
 basalt workspace apply --json .basalt-workspace PLAN_ID
 basalt workspace history --json .basalt-workspace
 basalt workspace diff --json .basalt-workspace CHANGE_ID
 basalt workspace undo --json .basalt-workspace CHANGE_ID
 ```
+
+The plan command reloads the persisted exact SQL and impact summary when a
+client loses the preview response or reconnects to the workspace.
 
 Apply writes a recovery snapshot before executing the transaction. History
 records are finalized after the database checkpoint; an interrupted finalize
@@ -145,7 +149,7 @@ exports instead of mixing metadata into the file format.
 ## Current boundary
 
 The workspace foundation provides `init`, `inspect`, read-only `query`,
-`preview`, `apply`, `history`, `diff`, `undo`, `import`, and `export`. The same
+`preview`, `plan`, `apply`, `history`, `diff`, `undo`, `import`, and `export`. The same
 ingest-to-undo lifecycle is available through `basalt mcp --workspace PATH`;
 MCP imports accept bounded CSV, JSON, or JSON Lines content and require
 `--allow-writes`. They create a recovery point and return a change ID, while

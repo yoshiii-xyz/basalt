@@ -50,7 +50,7 @@ const SNAPSHOTS_DIR: &str = "snapshots";
 
 pub const HELP: &str = "Basalt workspace — local, portable SQL workspaces\n\n\
 Usage:\n  basalt workspace <COMMAND> [OPTIONS]\n\n\
-Commands:\n  init PATH                         Create a workspace\n  inspect [--json] PATH             Show workspace metadata and schema\n  query [OPTIONS] PATH SQL          Run a read-only query\n  preview [--json] PATH SQL         Preview a write and save its plan\n  apply [--json] PATH PLAN_ID       Apply one exact preview plan\n  history [--json] PATH             List applied and recoverable changes\n  diff [--json] PATH [CHANGE_ID]    Compare a change recovery point\n  undo [--json] PATH CHANGE_ID      Undo the latest change safely\n  import [OPTIONS] WORKSPACE SOURCE Import CSV, JSON, JSONL, or SQL\n  export [OPTIONS] WORKSPACE TABLE OUTPUT\n                                     Export CSV, JSONL, or SQL\n\n\
+Commands:\n  init PATH                         Create a workspace\n  inspect [--json] PATH             Show workspace metadata and schema\n  query [OPTIONS] PATH SQL          Run a read-only query\n  preview [--json] PATH SQL         Preview a write and save its plan\n  plan [--json] PATH PLAN_ID        Load a saved preview plan\n  apply [--json] PATH PLAN_ID       Apply one exact preview plan\n  history [--json] PATH             List applied and recoverable changes\n  diff [--json] PATH [CHANGE_ID]    Compare a change recovery point\n  undo [--json] PATH CHANGE_ID      Undo the latest change safely\n  import [OPTIONS] WORKSPACE SOURCE Import CSV, JSON, JSONL, or SQL\n  export [OPTIONS] WORKSPACE TABLE OUTPUT\n                                     Export CSV, JSONL, or SQL\n\n\
 Import options:\n  --table NAME                      Table name (required for stdin)\n  --format csv|json|jsonl|sql       Override format inference\n  --json                            Emit a machine-readable import report\n\n\
 Export options:\n  --format csv|jsonl|sql             Override format inference\n  --json                            Emit a machine-readable export report\n\n\
 Query options:\n  --output table|csv|json             Result format (table by default)\n\n\
@@ -335,6 +335,11 @@ enum Command {
         sql: String,
         json: bool,
     },
+    Plan {
+        workspace: PathBuf,
+        plan_id: String,
+        json: bool,
+    },
     Apply {
         workspace: PathBuf,
         plan_id: String,
@@ -436,6 +441,21 @@ pub fn run<R: Read, W: Write>(
         } => {
             let workspace = Workspace::open(workspace)?;
             let plan = preview_plan(&workspace, &sql)?;
+            if json {
+                let report = PlanReport::from(&plan);
+                serde_json::to_writer_pretty(&mut *output, &report)?;
+                output.write_all(b"\n")?;
+            } else {
+                render_plan(&workspace, &plan, output)?;
+            }
+        }
+        Command::Plan {
+            workspace,
+            plan_id,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)?;
+            let plan = load_plan(&workspace, &plan_id)?;
             if json {
                 let report = PlanReport::from(&plan);
                 serde_json::to_writer_pretty(&mut *output, &report)?;
@@ -640,6 +660,7 @@ fn parse_command(args: &[String]) -> Result<Command, WorkspaceError> {
         Some("inspect") => parse_inspect(&args[1..]),
         Some("query") => parse_query(&args[1..]),
         Some("preview") => parse_preview(&args[1..]),
+        Some("plan") => parse_plan(&args[1..]),
         Some("apply") => parse_apply(&args[1..]),
         Some("history") => parse_history(&args[1..]),
         Some("diff") => parse_diff(&args[1..]),
@@ -794,6 +815,19 @@ fn parse_apply(args: &[String]) -> Result<Command, WorkspaceError> {
         2..=2,
     )?;
     Ok(Command::Apply {
+        workspace: PathBuf::from(&positional[0]),
+        plan_id: positional[1].clone(),
+        json,
+    })
+}
+
+fn parse_plan(args: &[String]) -> Result<Command, WorkspaceError> {
+    let (json, positional) = parse_json_flagged_command(
+        args,
+        "usage: basalt workspace plan [--json] PATH PLAN_ID",
+        2..=2,
+    )?;
+    Ok(Command::Plan {
         workspace: PathBuf::from(&positional[0]),
         plan_id: positional[1].clone(),
         json,
@@ -1414,6 +1448,15 @@ pub(crate) struct HistoryEntry {
     after_state: Option<String>,
     committed_generation: Option<u64>,
     error: Option<String>,
+    import: Option<HistoryImport>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct HistoryImport {
+    format: String,
+    table: String,
+    bytes: usize,
+    summary: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2005,17 +2048,26 @@ fn history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
     reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
     Ok(changes
         .into_iter()
-        .map(|change| HistoryEntry {
-            sequence: change.sequence,
-            change_id: change.change_id,
-            kind: change.kind,
-            status: change.status,
-            plan_id: change.plan_id,
-            target_change_id: change.target_change_id,
-            base_state: change.base_state,
-            after_state: change.after_state,
-            committed_generation: change.committed_generation,
-            error: change.error,
+        .map(|change| {
+            let import = change.import.map(|import| HistoryImport {
+                format: import.format,
+                table: import.table,
+                bytes: import.bytes,
+                summary: import.summary,
+            });
+            HistoryEntry {
+                sequence: change.sequence,
+                change_id: change.change_id,
+                kind: change.kind,
+                status: change.status,
+                plan_id: change.plan_id,
+                target_change_id: change.target_change_id,
+                base_state: change.base_state,
+                after_state: change.after_state,
+                committed_generation: change.committed_generation,
+                error: change.error,
+                import,
+            }
         })
         .collect())
 }
@@ -2489,6 +2541,22 @@ pub(crate) fn mcp_preview(
         Some(MAX_MCP_MUTATION_ROWS),
     )?;
     Ok(PlanReport::from(&plan))
+}
+
+pub(crate) fn mcp_plan(
+    workspace: &Workspace,
+    plan_id: &str,
+    max_output_bytes: usize,
+) -> Result<PlanReport, WorkspaceError> {
+    let plan = load_plan(workspace, plan_id)?;
+    let report = PlanReport::from(&plan);
+    let output_size = serde_json::to_vec(&report)?.len();
+    if output_size > max_output_bytes {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace plan is {output_size} bytes; response limit is {max_output_bytes} bytes"
+        )));
+    }
+    Ok(report)
 }
 
 pub(crate) fn mcp_apply(

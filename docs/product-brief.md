@@ -238,6 +238,8 @@ database-level snapshot diff. The output should state its precision honestly.
   rejected rather than replayed.
 - A failed import can be retried only from its unchanged recorded base state;
   unresolved records are not guessed at or replayed.
+- Persisted plans can be reloaded by identifier, and import history retains
+  enough provenance to recover review context after an MCP restart.
 - History and diagnostics never pollute MCP stdout.
 
 MCP annotations are useful host hints, but deterministic controls must live in

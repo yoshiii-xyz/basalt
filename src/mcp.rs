@@ -444,6 +444,7 @@ impl BasaltMcp {
                 "workspace_history",
                 "workspace_inspect",
                 "workspace_import",
+                "workspace_plan",
                 "workspace_preview",
                 "workspace_undo",
             ] {
@@ -775,6 +776,36 @@ impl BasaltMcp {
         .map_err(|error| format!("workspace preview task failed: {error}"))?
         .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace preview")?;
+        Ok(Json(response))
+    }
+
+    /// Reload a persisted workspace plan by its stable identifier.
+    #[tool(
+        name = "workspace_plan",
+        description = "Load one persisted workspace plan by ID and return its exact SQL, base state, and impact summary. Use this to recover review context after a restart; it never changes workspace data.",
+        annotations(
+            title = "Load workspace plan",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_plan(
+        &self,
+        Parameters(input): Parameters<PlanInput>,
+    ) -> Result<Json<crate::workspace::PlanReport>, String> {
+        let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
+            crate::workspace::mcp_plan(&workspace, &input.plan_id, MAX_OUTPUT_BYTES)
+        })
+        .await
+        .map_err(|error| format!("workspace plan task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace plan")?;
         Ok(Json(response))
     }
 

@@ -212,6 +212,7 @@ Workspace mode also provides:
 | `workspace_import` | Import bounded CSV, JSON, or JSON Lines content into a new table and create a recovery point | Yes; requires approval |
 | `workspace_inspect` | Read workspace metadata, schema, and row counts | No |
 | `workspace_preview` | Execute a bounded mutation in isolation and save its exact plan | Plan metadata only |
+| `workspace_plan` | Reload one persisted plan by ID, including exact SQL and impact metadata | No |
 | `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
 | `workspace_history` | Read the change ledger and recovery statuses | Recovery metadata may be reconciled |
 | `workspace_diff` | Compare a change recovery point with current state; bounded to 10,000 rows across each compared database | Recovery metadata may be reconciled |
@@ -231,7 +232,9 @@ In workspace mode, use this sequence:
 2. Call `workspace_inspect` or `query` to understand the current data.
 3. Call `workspace_preview` with the mutation. Review the returned exact `sql`
    and impact summary, then keep the returned `plan_id`.
-4. Have the operator approve the exact plan, then call `workspace_apply`.
+4. If the plan response was lost or the server restarted, call
+   `workspace_plan` with the saved `plan_id` to reload the exact review
+   context. Have the operator approve that plan, then call `workspace_apply`.
 5. Use `workspace_history` and `workspace_diff` to inspect the committed change.
 6. Call `workspace_undo` with the latest change ID if the change should be
    reversed.
@@ -275,7 +278,9 @@ inspect at most 10,000 rows in each compared database, and reject larger
 workspaces before building the comparison; use the CLI diff when a complete
 large-workspace comparison is intentional. History and diff may reconcile an
 interrupted operation's metadata, but they do not apply data changes and do not
-require `--allow-writes`.
+require `--allow-writes`. History includes import format, table, byte count,
+and summary when the record came from `workspace_import`; `workspace_plan`
+reloads the exact persisted SQL and preview impact by plan ID.
 
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the

@@ -405,6 +405,18 @@ fn previews_applies_diffs_and_undoes_one_change() {
         "UPDATE users SET name = 'Grace' WHERE id = 1"
     );
 
+    let loaded_plan = run(&["workspace", "plan", "--json", path_arg(&workspace), plan_id]);
+    assert!(
+        loaded_plan.status.success(),
+        "plan lookup failed: {loaded_plan:?}"
+    );
+    let loaded_plan: Value = serde_json::from_slice(&loaded_plan.stdout).unwrap();
+    assert_eq!(loaded_plan["plan_id"], plan_id);
+    assert_eq!(loaded_plan["statements"][0]["rows_affected"], 1);
+    assert_eq!(
+        loaded_plan["sql"],
+        "UPDATE users SET name = 'Grace' WHERE id = 1"
+    );
     let apply = run(&[
         "workspace",
         "apply",

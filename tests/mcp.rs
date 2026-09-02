@@ -412,6 +412,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
             "workspace_history",
             "workspace_import",
             "workspace_inspect",
+            "workspace_plan",
             "workspace_preview",
             "workspace_undo"
         ]
@@ -569,6 +570,19 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         1
     );
 
+    let saved_plan = writable.request(
+        15,
+        "tools/call",
+        json!({
+            "name": "workspace_plan",
+            "arguments": {"plan_id": plan_id}
+        }),
+    );
+    assert_eq!(
+        result(&saved_plan)["structuredContent"]["sql"],
+        "UPDATE users SET name = 'Grace' WHERE id = 1"
+    );
+
     let apply = writable.request(
         6,
         "tools/call",
@@ -641,6 +655,14 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert_eq!(
         result(&history)["structuredContent"][0]["status"],
         "committed"
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][0]["import"]["format"],
+        "csv"
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][0]["import"]["table"],
+        "users"
     );
     assert_eq!(
         result(&history)["structuredContent"][1]["change_id"],

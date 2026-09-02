@@ -8,6 +8,8 @@
 - Capped MCP workspace imports by rows, columns, and cells, and capped
   workspace MCP plans at 10,000 affected rows so bounded content and reviewed
   writes cannot expand into unbounded agent operations.
+- Added persisted plan lookup and import provenance to workspace history so an
+  agent can recover exact review context after an MCP restart.
 - Added release-archive verification for checksums, required files, executable
   contents, and unsafe archive members; the release host job also runs the
   extracted Linux artifact through the installed-binary smoke journey.
