@@ -13,6 +13,8 @@ use crate::crc::crc32;
 use crate::db::{DbError, DbErrorKind, State};
 
 pub const PAGE_SIZE: usize = 4096;
+/// Maximum encoded snapshot size accepted by the file and byte APIs.
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const FILE_MAGIC: &[u8; 8] = b"BASALTDB";
 const FILE_VERSION: u32 = 1;
 const FILE_HEADER: usize = 64;
@@ -37,6 +39,9 @@ pub fn write_snapshot(path: &Path, state: &State, generation: u64) -> Result<(),
                 .ok_or_else(|| corrupt("database snapshot is too large"))?,
         )
         .ok_or_else(|| corrupt("database snapshot is too large"))?;
+    if file_len > MAX_SNAPSHOT_BYTES {
+        return Err(corrupt("database snapshot is too large"));
+    }
 
     let mut bytes = vec![0u8; file_len];
     bytes[..8].copy_from_slice(FILE_MAGIC);
@@ -88,30 +93,51 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
     if !path.exists() {
         return Ok((State::empty(), 0));
     }
-    let mut file = File::open(path).map_err(|e| io_error("open database", e))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let file_len = fs::metadata(path)
+        .map_err(|e| io_error("inspect database", e))?
+        .len();
+    if file_len > MAX_SNAPSHOT_BYTES as u64 {
+        return Err(corrupt("database snapshot is too large"));
+    }
+    let file = File::open(path).map_err(|e| io_error("open database", e))?;
+    let mut bytes = Vec::with_capacity(file_len as usize);
+    file.take((MAX_SNAPSHOT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .map_err(|e| io_error("read database", e))?;
+    if bytes.len() > MAX_SNAPSHOT_BYTES {
+        return Err(corrupt("database snapshot is too large"));
+    }
+    read_snapshot_bytes(&bytes)
+}
+
+/// Validate and decode snapshot bytes without touching the filesystem.
+///
+/// This is useful for embedded callers that already control the bytes and for
+/// exercising the on-disk format boundary without creating a temporary file.
+pub fn read_snapshot_bytes(bytes: &[u8]) -> Result<(State, u64), DbError> {
+    if bytes.len() > MAX_SNAPSHOT_BYTES {
+        return Err(corrupt("database snapshot is too large"));
+    }
     if bytes.len() < FILE_HEADER {
         return Err(corrupt("database header is truncated"));
     }
     if &bytes[..8] != FILE_MAGIC {
         return Err(corrupt("invalid database magic"));
     }
-    if u32_at(&bytes, 8)? != FILE_VERSION {
+    if u32_at(bytes, 8)? != FILE_VERSION {
         return Err(corrupt("unsupported database version"));
     }
-    if u32_at(&bytes, 12)? as usize != PAGE_SIZE {
+    if u32_at(bytes, 12)? as usize != PAGE_SIZE {
         return Err(corrupt("unsupported database page size"));
     }
-    let header_crc = u32_at(&bytes, 40)?;
+    let header_crc = u32_at(bytes, 40)?;
     if crc32(&bytes[..40]) != header_crc {
         return Err(corrupt("database header checksum mismatch"));
     }
-    let generation = u64_at(&bytes, 16)?;
-    let payload_len = usize::try_from(u64_at(&bytes, 24)?)
+    let generation = u64_at(bytes, 16)?;
+    let payload_len = usize::try_from(u64_at(bytes, 24)?)
         .map_err(|_| corrupt("database payload is too large"))?;
-    let page_count = usize::try_from(u64_at(&bytes, 32)?)
+    let page_count = usize::try_from(u64_at(bytes, 32)?)
         .map_err(|_| corrupt("database page count is too large"))?;
     if page_count == 0 || payload_len > page_count.saturating_mul(PAGE_SIZE - PAGE_HEADER) {
         return Err(corrupt("invalid database payload size"));
@@ -131,10 +157,10 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
     let mut payload = Vec::with_capacity(payload_len);
     for page in 0..page_count {
         let offset = FILE_HEADER + page * PAGE_SIZE;
-        if u64_at(&bytes, offset)? != page as u64 {
+        if u64_at(bytes, offset)? != page as u64 {
             return Err(corrupt("database page sequence mismatch"));
         }
-        let len = usize::try_from(u64_at(&bytes, offset + 8)?)
+        let len = usize::try_from(u64_at(bytes, offset + 8)?)
             .map_err(|_| corrupt("database page is too large"))?;
         let payload_end = payload
             .len()
@@ -143,7 +169,7 @@ pub fn read_snapshot(path: &Path) -> Result<(State, u64), DbError> {
         if len > PAGE_SIZE - PAGE_HEADER || payload_end > payload_len {
             return Err(corrupt("invalid database page length"));
         }
-        let checksum = u32_at(&bytes, offset + 16)?;
+        let checksum = u32_at(bytes, offset + 16)?;
         let chunk = &bytes[offset + PAGE_HEADER..offset + PAGE_HEADER + len];
         if crc32(chunk) != checksum {
             return Err(corrupt("database page checksum mismatch"));

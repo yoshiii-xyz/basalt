@@ -198,10 +198,15 @@ calls.
 | src/workspace.rs | Local workspace lifecycle and data interchange |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
 | docs/sql.md | Supported SQL dialect and transaction semantics |
+| docs/compatibility.md | File-format boundary and differential-test policy |
+| docs/fuzzing.md | Parser and persistence fuzzing instructions |
 | docs/mcp.md | MCP installation, configuration, and tool contract |
 | docs/workspaces.md | Workspace layout and import/export contract |
 | tests/ | Integration and crash-recovery coverage |
-| benches/ | Throughput benchmark |
+| benches/ | In-process engine throughput benchmark |
+| scripts/benchmark_workspace.py | Reproducible workflow comparison harness |
+| scripts/differential_sql.py | Supported-subset SQLite differential checks |
+| fuzz/ | Optional libFuzzer parser and snapshot targets |
 
 ## Development
 
@@ -214,6 +219,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo bench --bench throughput
 cargo package --locked
 cargo build --release --locked
+cargo audit
+python3 scripts/benchmark_workspace.py --basalt target/release/basalt
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and

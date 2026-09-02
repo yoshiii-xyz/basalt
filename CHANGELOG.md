@@ -19,6 +19,13 @@
 - Added a `basalt-db` package boundary while preserving the `basalt` binary,
   reproducible `dist` release configuration, checksummed installer workflow,
   clean-binary smoke test, and scheduled RustSec dependency audit.
+- Added a reproducible workspace workflow benchmark with SQLite and optional
+  DuckDB baselines, explicit process-model notes, and no blanket performance
+  claim.
+- Added a documented file-format compatibility policy and differential checks
+  for a deliberately small shared SQL subset.
+- Added optional libFuzzer targets for arbitrary SQL parsing and snapshot/state
+  decoding, plus a bounded in-memory snapshot validation API.
 - Completed the embedded SQL engine, storage, indexes, transactions, WAL
   recovery, planner, and command-line frontend.
 - Added script execution, CSV/JSON-lines output, schema discovery, crash

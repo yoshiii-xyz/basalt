@@ -17,13 +17,23 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo package --locked
 cargo build --release --locked
 bash scripts/smoke-test.sh target/release/basalt
+python3 scripts/benchmark_workspace.py --basalt target/release/basalt \
+  --rows 10000 --repeats 3 > benchmark.json
 ```
 
-The test command includes the throughput benchmark target. Run the benchmark
-directly when a storage, planner, or execution change could affect its result:
+The test command includes the throughput benchmark target. Run the in-process
+benchmark directly when a storage, planner, or execution change could affect
+its result:
 
 ```bash
 cargo bench --bench throughput
+```
+
+The workflow benchmark is the comparable structured-data protocol:
+
+```bash
+python3 scripts/benchmark_workspace.py --basalt target/release/basalt \
+  --rows 10000 --repeats 3 > benchmark.json
 ```
 
 Dependency audit tools are optional local/CI additions. If `cargo audit` or a

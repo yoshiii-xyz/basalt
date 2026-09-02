@@ -42,3 +42,12 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Run installed-binary smoke test
+        run: bash scripts/smoke-test.sh target/release/basalt
+
+      - name: Validate workflow benchmark harness
+        run: python3 scripts/benchmark_workspace.py --basalt target/release/basalt --rows 1000 --repeats 1 > benchmark.json
+
+      - name: Run documented SQL differential checks
+        run: python3 scripts/differential_sql.py --basalt target/release/basalt

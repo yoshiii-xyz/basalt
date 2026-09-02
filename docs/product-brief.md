@@ -243,7 +243,14 @@ an ingestion script or knowing the internal file layout.
 - Milestone 5 remains open: incumbent benchmarks, differential/fuzz coverage,
   and a published release still need to be completed. Package contents,
   release generation, dependency auditing, and the clean-binary smoke path are
-  now implemented and verified locally.
+  now implemented and verified locally. The benchmark harness is now
+  present; its DuckDB baseline remains explicitly optional when that client is
+  unavailable in the execution environment, and the first full local run
+  completed against SQLite and DuckDB. The supported-subset differential checks
+  and compatibility policy are now implemented; persistence fuzzing and the
+  published release remain open. The parser and snapshot fuzz targets are now
+  implemented; a bounded fuzz campaign still needs to be run in a toolchain
+  that has cargo-fuzz available.
 
 ### Milestone 3 — Reversible state
 

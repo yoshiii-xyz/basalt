@@ -204,15 +204,16 @@ pub fn lex(input: &str) -> Result<Vec<TokenSpan>, LexError> {
                             i += 1;
                             break;
                         }
+                    } else {
+                        let ch_len = utf8_len(bytes[i]);
+                        s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| {
+                            LexError {
+                                message: "invalid UTF-8".into(),
+                                offset: i,
+                            }
+                        })?);
+                        i += ch_len;
                     }
-                    let ch_len = utf8_len(bytes[i]);
-                    s.push_str(std::str::from_utf8(&bytes[i..i + ch_len]).map_err(|_| {
-                        LexError {
-                            message: "invalid UTF-8".into(),
-                            offset: i,
-                        }
-                    })?);
-                    i += ch_len;
                 }
                 out.push_tok(Token::QuotedIdent(s), start);
             }
@@ -411,6 +412,11 @@ mod tests {
                 .iter()
                 .any(|span| span.token == Token::QuotedIdent("c]d".into()))
         );
+    }
+
+    #[test]
+    fn rejects_truncated_escaped_quoted_identifier() {
+        assert!(lex("\"\"\"").is_err());
     }
 
     #[test]

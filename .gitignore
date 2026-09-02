@@ -18,3 +18,12 @@
 *.swp
 coverage/
 *.profraw
+
+# Local benchmark output
+benchmark.json
+
+# Cargo-fuzz build products and crash artifacts
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+!fuzz/Cargo.lock
