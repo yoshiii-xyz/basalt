@@ -25,6 +25,8 @@
 - Added a reproducible workspace workflow benchmark with SQLite and optional
   DuckDB baselines, explicit process-model notes, and no blanket performance
   claim.
+- Added a recorded benchmark snapshot with host and client versions, median
+  operation timings, and the complete process-model caveat.
 - Added a documented file-format compatibility policy and differential checks
   for a deliberately small shared SQL subset.
 - Added optional libFuzzer targets for arbitrary SQL parsing and snapshot/state

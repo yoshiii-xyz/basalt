@@ -66,3 +66,7 @@ The benchmark intentionally makes no claim about:
 The supported SQL boundary is documented in [docs/sql.md](sql.md). The
 workspace contract and recovery precision are documented in
 [docs/workspaces.md](workspaces.md).
+
+See [the recorded benchmark snapshot](benchmark-results.md) for one complete
+10,000-row run with pinned host and client versions. It is evidence for the
+current bottlenecks, not a promise about another machine or workload.

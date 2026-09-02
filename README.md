@@ -199,6 +199,7 @@ calls.
 | src/workspace.rs | Local workspace lifecycle and data interchange |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
 | docs/sql.md | Supported SQL dialect and transaction semantics |
+| docs/benchmark-results.md | Recorded workflow benchmark snapshot |
 | docs/compatibility.md | File-format boundary and differential-test policy |
 | docs/fuzzing.md | Parser and persistence fuzzing instructions |
 | docs/mcp.md | MCP installation, configuration, and tool contract |
