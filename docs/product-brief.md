@@ -199,11 +199,11 @@ The CLI and MCP expose the same lifecycle:
 inspect -> preview -> apply -> diff/history -> undo or export
 ```
 
-Preview executes against an isolated transaction and returns the statements,
-affected-row estimates/counts, result metadata, and a stable plan identifier.
-Apply accepts only the exact previewed operation, creates a recovery point, and
-returns the committed change identifier. Undo restores the recovery point
-without rewriting unrelated history.
+Preview executes against an isolated transaction and returns the exact SQL,
+statements, affected-row estimates/counts, result metadata, and a stable plan
+identifier. Apply accepts only the exact previewed operation, creates a
+recovery point, and returns the committed change identifier. Undo restores the
+recovery point without rewriting unrelated history.
 
 The implementation must not claim a row-level diff when it only has a
 database-level snapshot diff. The output should state its precision honestly.

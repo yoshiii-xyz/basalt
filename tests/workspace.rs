@@ -330,6 +330,10 @@ fn previews_applies_diffs_and_undoes_one_change() {
     assert_eq!(preview["mutating_statements"], 1);
     assert_eq!(preview["statements"][0]["rows_affected"], 1);
     let plan_id = preview["plan_id"].as_str().unwrap();
+    assert_eq!(
+        preview["sql"],
+        "UPDATE users SET name = 'Grace' WHERE id = 1"
+    );
 
     let apply = run(&[
         "workspace",

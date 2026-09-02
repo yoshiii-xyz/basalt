@@ -81,8 +81,10 @@ basalt workspace preview --json .basalt-workspace \
   "UPDATE issues SET status = 'closed' WHERE id = 42"
 ```
 
-The returned `plan_id` is derived from the exact SQL and the current database
-state fingerprint. Apply requires that plan ID and refuses a stale plan:
+The returned report includes the exact SQL, impact summary, and a `plan_id`
+derived from that SQL and the current database state fingerprint. Review the
+SQL before applying the plan; apply requires that plan ID and refuses a stale
+plan:
 
 ```bash
 basalt workspace apply --json .basalt-workspace PLAN_ID

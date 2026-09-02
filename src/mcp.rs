@@ -715,7 +715,7 @@ impl BasaltMcp {
     /// Preview a workspace mutation and persist its exact plan.
     #[tool(
         name = "workspace_preview",
-        description = "Preview a mutating SQL sequence in an isolated transaction and return an exact plan ID. The workspace data is not changed; apply the returned plan explicitly.",
+        description = "Preview a mutating SQL sequence in an isolated transaction and return the exact SQL, impact summary, and plan ID. The workspace data is not changed; apply the returned plan explicitly.",
         annotations(
             title = "Preview workspace write",
             read_only_hint = false,

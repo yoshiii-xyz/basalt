@@ -1216,6 +1216,7 @@ struct PlanRecord {
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct PlanReport {
     plan_id: String,
+    sql: String,
     base_generation: u64,
     base_state: String,
     statement_count: usize,
@@ -1227,6 +1228,7 @@ impl From<&PlanRecord> for PlanReport {
     fn from(plan: &PlanRecord) -> Self {
         Self {
             plan_id: plan.plan_id.clone(),
+            sql: plan.sql.clone(),
             base_generation: plan.base_generation,
             base_state: plan.base_state.clone(),
             statement_count: plan.statements.len(),

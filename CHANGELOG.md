@@ -9,6 +9,8 @@
   retry after a lost response by persisting an import request fingerprint.
 - Allowed an exact retry of a failed workspace MCP import when its recorded
   base state is still unchanged; unresolved or moved imports remain blocked.
+- Included the exact SQL in CLI and MCP workspace preview reports so an
+  operator can review the operation before approving its plan ID.
 - Added concise Claude Code and Cursor project configuration paths for the
   installed workspace MCP server, while keeping server-side writes explicit.
 - Corrected the MCP workspace import annotation to identify it as additive

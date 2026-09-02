@@ -539,6 +539,10 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         .expect("preview should return a plan ID")
         .to_owned();
     assert_eq!(
+        result(&preview)["structuredContent"]["sql"],
+        "UPDATE users SET name = 'Grace' WHERE id = 1"
+    );
+    assert_eq!(
         result(&preview)["structuredContent"]["mutating_statements"],
         1
     );

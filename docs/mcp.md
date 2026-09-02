@@ -205,7 +205,8 @@ In workspace mode, use this sequence:
    JSON Lines, caps content at 16 MiB, never accepts a filesystem path, and
    returns a recoverable `change_id`.
 2. Call `workspace_inspect` or `query` to understand the current data.
-3. Call `workspace_preview` with the mutation. Keep the returned `plan_id`.
+3. Call `workspace_preview` with the mutation. Review the returned exact `sql`
+   and impact summary, then keep the returned `plan_id`.
 4. Have the operator approve the exact plan, then call `workspace_apply`.
 5. Use `workspace_history` and `workspace_diff` to inspect the committed change.
 6. Call `workspace_undo` with the latest change ID if the change should be
