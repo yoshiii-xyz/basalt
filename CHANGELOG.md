@@ -11,6 +11,8 @@
   base state is still unchanged; unresolved or moved imports remain blocked.
 - Included the exact SQL in CLI and MCP workspace preview reports so an
   operator can review the operation before approving its plan ID.
+- Validated MCP preview response size before persisting plan metadata, so an
+  oversized response cannot leave an orphaned plan behind.
 - Added concise Claude Code and Cursor project configuration paths for the
   installed workspace MCP server, while keeping server-side writes explicit.
 - Corrected the MCP workspace import annotation to identify it as additive

@@ -212,6 +212,10 @@ In workspace mode, use this sequence:
 6. Call `workspace_undo` with the latest change ID if the change should be
    reversed.
 
+The complete preview report is checked against the MCP response limit before
+its plan metadata is persisted. An oversized preview fails without leaving a
+plan record that the caller cannot inspect.
+
 Workspace SQL calls open the workspace for one operation at a time. They do not
 provide a multi-call SQL transaction; the durable plan and recovery lifecycle
 is the transaction boundary. `workspace_apply` rejects stale plans and never

@@ -730,7 +730,7 @@ impl BasaltMcp {
     ) -> Result<Json<crate::workspace::PlanReport>, String> {
         let workspace = self.target.workspace()?;
         let response = tokio::task::spawn_blocking(move || {
-            crate::workspace::mcp_preview(&workspace, &input.sql)
+            crate::workspace::mcp_preview(&workspace, &input.sql, MAX_OUTPUT_BYTES)
         })
         .await
         .map_err(|error| format!("workspace preview task failed: {error}"))?

@@ -1326,6 +1326,12 @@ struct TableSnapshot {
 }
 
 fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
+    let plan = build_preview_plan(workspace, sql)?;
+    persist_plan(workspace, &plan)?;
+    Ok(plan)
+}
+
+fn build_preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, WorkspaceError> {
     if sql.len() > MAX_PREVIEW_BYTES {
         return Err(WorkspaceError::Invalid(format!(
             "SQL exceeds the {} MiB preview limit",
@@ -1390,19 +1396,23 @@ fn preview_plan(workspace: &Workspace, sql: &str) -> Result<PlanRecord, Workspac
         sql: sql.to_string(),
         statements: preview_items,
     };
+    Ok(plan)
+}
+
+fn persist_plan(workspace: &Workspace, plan: &PlanRecord) -> Result<(), WorkspaceError> {
     ensure_history_dirs(workspace)?;
     let path = plan_path(workspace, &plan.plan_id);
     if path.exists() {
         let existing: PlanRecord = read_json(&path)?;
-        if existing != plan {
+        if existing != *plan {
             return Err(WorkspaceError::Invalid(
                 "plan identifier collision; refusing to replace an existing plan".to_string(),
             ));
         }
     } else {
-        write_new_json(&path, &plan)?;
+        write_new_json(&path, plan)?;
     }
-    Ok(plan)
+    Ok(())
 }
 
 fn preview_item(statement: usize, result: &StatementResult) -> PreviewItem {
@@ -2237,8 +2247,21 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
     })
 }
 
-pub(crate) fn mcp_preview(workspace: &Workspace, sql: &str) -> Result<PlanReport, WorkspaceError> {
-    Ok(PlanReport::from(&preview_plan(workspace, sql)?))
+pub(crate) fn mcp_preview(
+    workspace: &Workspace,
+    sql: &str,
+    max_output_bytes: usize,
+) -> Result<PlanReport, WorkspaceError> {
+    let plan = build_preview_plan(workspace, sql)?;
+    let report = PlanReport::from(&plan);
+    let output_size = serde_json::to_vec(&report)?.len();
+    if output_size > max_output_bytes {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace preview is {output_size} bytes; response limit is {max_output_bytes} bytes"
+        )));
+    }
+    persist_plan(workspace, &plan)?;
+    Ok(report)
 }
 
 pub(crate) fn mcp_apply(
@@ -3305,6 +3328,23 @@ mod tests {
             json_cell(&serde_json::json!({"nested": true})),
             ImportedCell::Text(value) if value == "{\"nested\":true}"
         ));
+    }
+
+    #[test]
+    fn rejects_an_oversized_mcp_preview_before_persisting_its_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-preview-limit-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let error = mcp_preview(&workspace, "CREATE TABLE users (id INTEGER)", 1).unwrap_err();
+        assert!(error.to_string().contains("response limit is 1 bytes"));
+        assert!(!root.join(HISTORY_DIR).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
