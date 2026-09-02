@@ -5,7 +5,7 @@
 //! the small `basalt mcp` command-line parser.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -406,6 +406,7 @@ struct CheckpointResult {
 struct BasaltMcp {
     target: McpTarget,
     connection: Arc<Mutex<Connection>>,
+    workspace_operation_lock: Arc<Mutex<()>>,
     allow_writes: bool,
     tool_router: ToolRouter<Self>,
 }
@@ -437,6 +438,7 @@ impl BasaltMcp {
         Self {
             target,
             connection: Arc::new(Mutex::new(connection)),
+            workspace_operation_lock: Arc::new(Mutex::new(())),
             allow_writes,
             tool_router,
         }
@@ -462,9 +464,14 @@ impl BasaltMcp {
         Parameters(input): Parameters<SqlInput>,
     ) -> Result<Json<SqlResult>, String> {
         if self.target.is_workspace() {
-            execute_workspace_sql(self.target.workspace()?, input, true)
-                .await
-                .map(Json)
+            execute_workspace_sql(
+                self.target.workspace()?,
+                input,
+                true,
+                self.workspace_operation_lock.clone(),
+            )
+            .await
+            .map(Json)
         } else {
             execute_sql(self.connection.clone(), input, true)
                 .await
@@ -520,11 +527,13 @@ impl BasaltMcp {
     async fn list_tables(&self) -> Result<Json<ListTablesResult>, String> {
         let connection = self.connection.clone();
         let target = self.target.clone();
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         tokio::task::spawn_blocking(move || match target {
             McpTarget::Database(database) => {
                 with_connection(&connection, |_| table_info(&database))
             }
             McpTarget::Workspace(workspace) => {
+                let _operation = lock_workspace_operations(&workspace_operation_lock)?;
                 let database = workspace
                     .database()
                     .map_err(|error| format!("could not open workspace database: {error}"))?;
@@ -558,6 +567,7 @@ impl BasaltMcp {
     ) -> Result<Json<TableInfo>, String> {
         let connection = self.connection.clone();
         let target = self.target.clone();
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         tokio::task::spawn_blocking(move || {
             let operation = |database: &Database| {
                 let name = database
@@ -583,6 +593,7 @@ impl BasaltMcp {
                     with_connection(&connection, |_| operation(&database))
                 }
                 McpTarget::Workspace(workspace) => {
+                    let _operation = lock_workspace_operations(&workspace_operation_lock)?;
                     let database = workspace
                         .database()
                         .map_err(|error| format!("could not open workspace database: {error}"))?;
@@ -616,6 +627,7 @@ impl BasaltMcp {
         }
         let connection = self.connection.clone();
         let target = self.target.clone();
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         tokio::task::spawn_blocking(move || match target {
             McpTarget::Database(_) => with_connection(&connection, |connection| {
                 connection
@@ -628,6 +640,7 @@ impl BasaltMcp {
                 Ok(response)
             }),
             McpTarget::Workspace(workspace) => {
+                let _operation = lock_workspace_operations(&workspace_operation_lock)?;
                 let database = workspace
                     .database()
                     .map_err(|error| format!("could not open workspace database: {error}"))?;
@@ -660,11 +673,15 @@ impl BasaltMcp {
     )]
     async fn workspace_inspect(&self) -> Result<Json<crate::workspace::InspectReport>, String> {
         let workspace = self.target.workspace()?;
-        let response =
-            tokio::task::spawn_blocking(move || crate::workspace::mcp_inspect(&workspace))
-                .await
-                .map_err(|error| format!("workspace inspection task failed: {error}"))?
-                .map_err(|error| error.to_string())?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
+            crate::workspace::mcp_inspect(&workspace)
+        })
+        .await
+        .map_err(|error| format!("workspace inspection task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace inspection")?;
         Ok(Json(response))
     }
@@ -698,7 +715,10 @@ impl BasaltMcp {
             ));
         }
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_import(
                 &workspace,
                 Some(&input.table),
@@ -730,7 +750,10 @@ impl BasaltMcp {
         Parameters(input): Parameters<WorkspaceSqlInput>,
     ) -> Result<Json<crate::workspace::PlanReport>, String> {
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_preview(&workspace, &input.sql, MAX_OUTPUT_BYTES)
         })
         .await
@@ -763,7 +786,10 @@ impl BasaltMcp {
             );
         }
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_apply(&workspace, &input.plan_id)
         })
         .await
@@ -787,11 +813,15 @@ impl BasaltMcp {
     )]
     async fn workspace_history(&self) -> Result<Json<Vec<crate::workspace::HistoryEntry>>, String> {
         let workspace = self.target.workspace()?;
-        let response =
-            tokio::task::spawn_blocking(move || crate::workspace::mcp_history(&workspace))
-                .await
-                .map_err(|error| format!("workspace history task failed: {error}"))?
-                .map_err(|error| error.to_string())?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
+            crate::workspace::mcp_history(&workspace)
+        })
+        .await
+        .map_err(|error| format!("workspace history task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
         ensure_output_size(&response, "workspace history")?;
         Ok(Json(response))
     }
@@ -813,7 +843,10 @@ impl BasaltMcp {
         Parameters(input): Parameters<DiffInput>,
     ) -> Result<Json<crate::workspace::DiffReport>, String> {
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_diff(&workspace, input.change_id.as_deref())
         })
         .await
@@ -848,7 +881,10 @@ impl BasaltMcp {
             );
         }
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_undo(&workspace, &input.change_id)
         })
         .await
@@ -875,7 +911,10 @@ impl BasaltMcp {
         Parameters(input): Parameters<ExportInput>,
     ) -> Result<Json<crate::workspace::ExportReport>, String> {
         let workspace = self.target.workspace()?;
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
         let response = tokio::task::spawn_blocking(move || {
+            let _operation = lock_workspace_operations(&workspace_operation_lock)
+                .map_err(crate::workspace::WorkspaceError::Invalid)?;
             crate::workspace::mcp_export(&workspace, &input.table, &input.format, MAX_OUTPUT_BYTES)
         })
         .await
@@ -932,20 +971,22 @@ impl ServerHandler for BasaltMcp {
         }
 
         let target = self.target.clone();
-        let schema = match target {
+        let connection = self.connection.clone();
+        let workspace_operation_lock = self.workspace_operation_lock.clone();
+        let schema = tokio::task::spawn_blocking(move || match target {
             McpTarget::Database(database) => {
-                with_connection(&self.connection, |_| schema_json(&database))
+                with_connection(&connection, |_| schema_json(&database))
             }
             McpTarget::Workspace(workspace) => {
-                let database = workspace.database().map_err(|error| {
-                    ErrorData::internal_error(
-                        format!("could not open workspace database: {error}"),
-                        None,
-                    )
-                })?;
+                let _operation = lock_workspace_operations(&workspace_operation_lock)?;
+                let database = workspace
+                    .database()
+                    .map_err(|error| format!("could not open workspace database: {error}"))?;
                 schema_json(&database)
             }
-        }
+        })
+        .await
+        .map_err(|error| ErrorData::internal_error(format!("schema task failed: {error}"), None))?
         .map_err(|error| {
             ErrorData::internal_error(format!("could not read schema: {error}"), None)
         })?;
@@ -991,10 +1032,12 @@ async fn execute_workspace_sql(
     workspace: crate::workspace::Workspace,
     input: SqlInput,
     read_only: bool,
+    workspace_operation_lock: Arc<Mutex<()>>,
 ) -> Result<SqlResult, String> {
     let max_rows = row_limit(input.max_rows)?;
     validate_sql(&input.sql, read_only)?;
     tokio::task::spawn_blocking(move || {
+        let _operation = lock_workspace_operations(&workspace_operation_lock)?;
         let started = Instant::now();
         let database = workspace
             .database()
@@ -1153,6 +1196,11 @@ fn with_connection<T>(
         .lock()
         .map_err(|_| "database connection lock poisoned".to_string())?;
     operation(&mut connection)
+}
+
+fn lock_workspace_operations(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, String> {
+    lock.lock()
+        .map_err(|_| "workspace operation lock poisoned".to_string())
 }
 
 fn table_info(database: &Database) -> Result<ListTablesResult, String> {

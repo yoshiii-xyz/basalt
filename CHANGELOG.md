@@ -9,6 +9,8 @@
   generated release workflow pins kept in `dist-workspace.toml`.
 - Bounded MCP workspace diffs to 10,000 inspected rows per compared database
   and removed unnecessary checkpoint writes from history and diff reads.
+- Serialized workspace MCP operations within one server process so concurrent
+  valid requests cannot race the workspace database lock.
 - MCP export and diff row limits now reject oversized tables before row data is
   materialized, while the CLI keeps its complete-table behavior.
 - Keep a workspace lock for the full lifetime of CLI and MCP ownership, closing

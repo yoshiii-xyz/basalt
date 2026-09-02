@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ struct McpProcess {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    pending: HashMap<u64, Value>,
 }
 
 impl McpProcess {
@@ -98,6 +100,7 @@ impl McpProcess {
             child,
             input,
             output,
+            pending: HashMap::new(),
         }
     }
 
@@ -120,6 +123,9 @@ impl McpProcess {
     }
 
     fn response(&mut self, id: u64) -> Value {
+        if let Some(message) = self.pending.remove(&id) {
+            return message;
+        }
         loop {
             let mut line = String::new();
             let bytes = self
@@ -133,6 +139,9 @@ impl McpProcess {
             let message: Value = serde_json::from_str(&line).expect("stdout must contain JSON-RPC");
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 return message;
+            }
+            if let Some(response_id) = message.get("id").and_then(Value::as_u64) {
+                self.pending.insert(response_id, message);
             }
         }
     }
@@ -741,6 +750,44 @@ fn workspace_mcp_owns_workspace_until_shutdown() {
         available.status.success(),
         "workspace should reopen after MCP shutdown: {available:?}"
     );
+}
+
+#[test]
+fn workspace_mcp_serializes_concurrent_requests() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let mut server = McpProcess::start_with_workspace(&workspace, false);
+    initialize_legacy(&mut server);
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "workspace_inspect", "arguments": {}}
+    }));
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "workspace_inspect", "arguments": {}}
+    }));
+
+    let first = server.response(2);
+    let second = server.response(3);
+    for response in [&first, &second] {
+        let tool_result = result(response);
+        assert_ne!(
+            tool_result["isError"], true,
+            "concurrent request failed: {response}"
+        );
+        assert!(tool_result["structuredContent"]["tables"].is_array());
+    }
+    server.close();
 }
 
 #[test]

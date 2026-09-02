@@ -217,10 +217,14 @@ its plan metadata is persisted. An oversized preview fails without leaving a
 plan record that the caller cannot inspect.
 
 Workspace SQL calls open the underlying database for one operation at a time,
-while the workspace itself remains exclusively owned by the process that opened
-it. They do not provide a multi-call SQL transaction; the durable plan and
-recovery lifecycle is the transaction boundary. `workspace_apply` rejects stale
-plans and never silently applies a mutation against a changed base state.
+and Basalt serializes workspace operations within one MCP server process. This
+is required because MCP hosts may dispatch requests concurrently while a
+workspace has one file-backed database lock. The workspace itself remains
+exclusively owned by the process that opened it, so a separate CLI or MCP
+process is rejected until the owner exits. Workspace SQL does not provide a
+multi-call SQL transaction; the durable plan and recovery lifecycle is the
+transaction boundary. `workspace_apply` rejects stale plans and never silently
+applies a mutation against a changed base state.
 
 Workspace previews accept at most 64 statements and 32 mutating statements per
 call. This bounds the impact described by one plan; larger jobs should be
