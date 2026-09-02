@@ -300,6 +300,10 @@ require `--allow-writes`. History includes import format, table, byte count,
 and summary for every workspace import; `workspace_plan`
 reloads the exact persisted SQL and preview impact by plan ID.
 
+`workspace_history` rejects a ledger larger than 10,000 change records or 1 MiB
+of change metadata before loading the full response. Use the CLI history command
+for a complete inspection of a larger local ledger.
+
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the
 original receipt when the workspace is still at the recorded post-operation

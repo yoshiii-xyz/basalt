@@ -46,6 +46,8 @@ const MAX_PREVIEW_ROWS: usize = 10_000;
 const MAX_MCP_MUTATION_ROWS: usize = 10_000;
 const MAX_MCP_DIFF_ROWS: usize = 10_000;
 const MAX_MCP_EXPORT_ROWS: usize = 10_000;
+const MAX_MCP_HISTORY_ENTRIES: usize = 10_000;
+const MAX_MCP_HISTORY_METADATA_BYTES: u64 = 1024 * 1024;
 const HISTORY_DIR: &str = "history";
 const PLANS_DIR: &str = "plans";
 const CHANGES_DIR: &str = "changes";
@@ -1959,12 +1961,21 @@ fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, Workspa
 }
 
 fn load_changes(workspace: &Workspace) -> Result<Vec<ChangeRecord>, WorkspaceError> {
+    load_changes_with_limits(workspace, None, None)
+}
+
+fn load_changes_with_limits(
+    workspace: &Workspace,
+    max_entries: Option<usize>,
+    max_metadata_bytes: Option<u64>,
+) -> Result<Vec<ChangeRecord>, WorkspaceError> {
     validate_history_dirs(workspace)?;
     let directory = workspace.root.join(HISTORY_DIR).join(CHANGES_DIR);
     if !directory.exists() {
         return Ok(Vec::new());
     }
     let mut changes = Vec::new();
+    let mut metadata_bytes = 0u64;
     for entry in fs::read_dir(&directory)? {
         let path = entry?.path();
         if path_is_symlink(&path)? {
@@ -1981,6 +1992,24 @@ fn load_changes(workspace: &Workspace) -> Result<Vec<ChangeRecord>, WorkspaceErr
                 "workspace history record is not a file: {}",
                 path.display()
             )));
+        }
+        if let Some(max_entries) = max_entries
+            && changes.len() >= max_entries
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "MCP workspace history exceeds the {max_entries}-entry limit"
+            )));
+        }
+        if let Some(max_metadata_bytes) = max_metadata_bytes {
+            let bytes = fs::symlink_metadata(&path)?.len();
+            metadata_bytes = metadata_bytes.checked_add(bytes).ok_or_else(|| {
+                WorkspaceError::Invalid("MCP workspace history metadata is too large".to_string())
+            })?;
+            if metadata_bytes > max_metadata_bytes {
+                return Err(WorkspaceError::Invalid(format!(
+                    "MCP workspace history metadata exceeds the {max_metadata_bytes}-byte limit"
+                )));
+            }
         }
         let change: ChangeRecord = read_json(&path)?;
         valid_id(&change.change_id)?;
@@ -2074,10 +2103,18 @@ fn reconcile_changes(
 }
 
 fn history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
+    history_with_limits(workspace, None, None)
+}
+
+fn history_with_limits(
+    workspace: &Workspace,
+    max_entries: Option<usize>,
+    max_metadata_bytes: Option<u64>,
+) -> Result<Vec<HistoryEntry>, WorkspaceError> {
     let database = workspace.database()?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
-    let mut changes = load_changes(workspace)?;
+    let mut changes = load_changes_with_limits(workspace, max_entries, max_metadata_bytes)?;
     reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
     Ok(changes
         .into_iter()
@@ -2658,7 +2695,11 @@ pub(crate) fn mcp_apply(
 }
 
 pub(crate) fn mcp_history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
-    history(workspace)
+    history_with_limits(
+        workspace,
+        Some(MAX_MCP_HISTORY_ENTRIES),
+        Some(MAX_MCP_HISTORY_METADATA_BYTES),
+    )
 }
 
 pub(crate) fn mcp_diff(
@@ -4131,6 +4172,52 @@ mod tests {
         let error = mcp_preview(&workspace, "CREATE TABLE users (id INTEGER)", 1).unwrap_err();
         assert!(error.to_string().contains("response limit is 1 bytes"));
         assert!(!root.join(HISTORY_DIR).exists());
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_history_rejects_an_oversized_external_ledger_before_loading_it() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-history-limit-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        ensure_history_dirs(&workspace).unwrap();
+        let change_id = "a".repeat(64);
+        let change = ChangeRecord {
+            format_version: FORMAT_VERSION,
+            sequence: 1,
+            change_id: change_id.clone(),
+            kind: ChangeKind::Apply,
+            plan_id: None,
+            target_change_id: None,
+            base_generation: 0,
+            base_state: "sha256:base".to_string(),
+            expected_state: None,
+            snapshot_id: change_id.clone(),
+            sql: None,
+            status: ChangeStatus::Failed,
+            committed_generation: None,
+            after_state: None,
+            error: Some("test".to_string()),
+            import: None,
+        };
+        write_new_json(&change_path(&workspace, &change_id), &change).unwrap();
+
+        let error = load_changes_with_limits(&workspace, Some(0), None).unwrap_err();
+        assert!(error.to_string().contains("exceeds the 0-entry limit"));
+        let error = load_changes_with_limits(&workspace, None, Some(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("history metadata exceeds the 1-byte limit")
+        );
+
         drop(workspace);
         fs::remove_dir_all(root).unwrap();
     }

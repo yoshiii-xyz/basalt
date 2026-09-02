@@ -5,6 +5,9 @@
 - Bounded CLI SQL scripts, stdin, command-line actions, and interactive input to
   16 MiB, including line-by-line enforcement so a missing newline cannot grow
   the shell buffer without limit.
+- Bounded MCP workspace history enumeration so oversized external change ledgers
+  fail before all metadata is parsed into memory; the CLI remains the complete
+  local history reader.
 - Bounded WAL frame and file handling so recovery never reads an unbounded log
   into memory, and writes fail clearly when checkpointing is required.
 - Hardened durable paths against symbolic-link sidecars and made snapshot
