@@ -66,7 +66,8 @@ and compiles all targets on macOS and Windows runners. The release workflow's
 artifact matrix remains the source of truth for the published architectures.
 
 The MCP Registry is a separate metadata publication. Its current preview
-supports Cargo and MCPB packages but does not host the artifacts themselves;
+supports multiple package types, including Cargo and MCPB, but does not host
+the artifacts themselves;
 publish `server.json` only after the crates.io package and GitHub release are
 available. Cargo registry ownership verification also requires a visible
 `mcp-name:` marker in the rendered package README. The planned server name is

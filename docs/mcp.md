@@ -216,10 +216,11 @@ The complete preview report is checked against the MCP response limit before
 its plan metadata is persisted. An oversized preview fails without leaving a
 plan record that the caller cannot inspect.
 
-Workspace SQL calls open the workspace for one operation at a time. They do not
-provide a multi-call SQL transaction; the durable plan and recovery lifecycle
-is the transaction boundary. `workspace_apply` rejects stale plans and never
-silently applies a mutation against a changed base state.
+Workspace SQL calls open the underlying database for one operation at a time,
+while the workspace itself remains exclusively owned by the process that opened
+it. They do not provide a multi-call SQL transaction; the durable plan and
+recovery lifecycle is the transaction boundary. `workspace_apply` rejects stale
+plans and never silently applies a mutation against a changed base state.
 
 Workspace previews accept at most 64 statements and 32 mutating statements per
 call. This bounds the impact described by one plan; larger jobs should be
@@ -303,8 +304,7 @@ into the snapshot and remove old WAL frames. `checkpoint` is a no-op for
 `:memory:`, but still requires `--allow-writes` because it is a write-capable
 operation in the protocol contract. A durable path is exclusively owned by one
 process; a second CLI or MCP process receives an "already open" error instead
-of competing for the same WAL. Workspace lifecycle operations likewise open
-the underlying database one at a time. A workspace is exclusively owned by the
+of competing for the same WAL. A workspace is exclusively owned by the
 Basalt process that opened it, including an MCP server, until that process
 exits. Stop the MCP server before using the workspace from the CLI or another
 MCP server. This ownership lasts across the short database close/reopen window
