@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hardened workspace export protection so path aliases cannot overwrite the
+  workspace database or manifest.
 - Made exact workspace apply and undo retries return the original receipt after
   a lost response, while rejecting retries against moved workspace state; MCP
   metadata now advertises those retries as idempotent.

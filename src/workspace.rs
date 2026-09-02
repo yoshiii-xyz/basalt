@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use csv::{ReaderBuilder, StringRecord, Writer};
@@ -3282,16 +3282,61 @@ fn same_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    let absolute = |path: &Path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|directory| directory.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
+    match (resolved_path(left), resolved_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => normalized_path(left) == normalized_path(right),
+    }
+}
+
+fn resolved_path(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match fs::canonicalize(&candidate) {
+            Ok(mut resolved) => {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = candidate.file_name()?.to_os_string();
+                suffix.push(name);
+                if !candidate.pop() {
+                    return None;
+                }
+            }
+            Err(_) => return None,
         }
+    }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     };
-    absolute(left) == absolute(right)
+    let mut components = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(components.last(), Some(Component::Normal(_))) {
+                    components.pop();
+                }
+            }
+            _ => components.push(component),
+        }
+    }
+    components
+        .into_iter()
+        .fold(PathBuf::new(), |mut path, component| {
+            path.push(component.as_os_str());
+            path
+        })
 }
 
 #[cfg(test)]
@@ -3326,6 +3371,24 @@ mod tests {
             String::from_utf8(manifest_bytes(&manifest).unwrap()).unwrap(),
             "{\n  \"format_version\": 1,\n  \"database\": \"data.basalt\"\n}\n"
         );
+    }
+
+    #[test]
+    fn resolves_path_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-same-path-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        let direct = root.join("workspace/data.basalt");
+        let alias = root.join("workspace/../workspace/data.basalt");
+        fs::write(&direct, b"database").unwrap();
+        assert!(same_path(&alias, &direct));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

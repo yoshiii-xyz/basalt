@@ -216,6 +216,51 @@ fn machine_readable_import_and_export_reports_are_unambiguous() {
 }
 
 #[test]
+fn refuses_export_paths_that_alias_workspace_metadata() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("events.csv");
+    fs::write(&source, "id,name\n1,Ada\n").unwrap();
+    assert!(run(&["init", path_arg(&workspace)]).status.success());
+    assert!(
+        run(&[
+            "workspace",
+            "import",
+            "--table",
+            "events",
+            path_arg(&workspace),
+            path_arg(&source),
+        ])
+        .status
+        .success()
+    );
+
+    for protected_file in ["data.basalt", "workspace.json"] {
+        let alias = workspace.join("..").join("workspace").join(protected_file);
+        let output = run(&[
+            "workspace",
+            "export",
+            "--format",
+            "csv",
+            path_arg(&workspace),
+            "events",
+            path_arg(&alias),
+        ]);
+        assert!(
+            !output.status.success(),
+            "export unexpectedly succeeded: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("refusing to overwrite workspace metadata or database"),
+            "unexpected export error: {output:?}"
+        );
+    }
+
+    assert_eq!(inspect(&workspace)["tables"][0]["rows"], 1);
+}
+
+#[test]
 fn json_import_and_sql_roundtrip_are_deterministic() {
     let temp = TempDir::new();
     let workspace = temp.path().join("json-workspace");
