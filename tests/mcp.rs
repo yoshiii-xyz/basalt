@@ -862,6 +862,24 @@ fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
             .expect("export rejection should include text")
             .contains("limited to 10000 rows")
     );
+
+    let diff = server.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "workspace_diff",
+            "arguments": {
+                "change_id": result(&imported)["structuredContent"]["change_id"]
+            }
+        }),
+    );
+    assert_eq!(result(&diff)["isError"], true);
+    assert!(
+        result(&diff)["content"][0]["text"]
+            .as_str()
+            .expect("diff rejection should include text")
+            .contains("MCP diff is limited to 10000 rows")
+    );
     server.close();
 }
 

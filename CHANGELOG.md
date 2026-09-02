@@ -5,6 +5,8 @@
 - Added release-archive verification for checksums, required files, executable
   contents, and unsafe archive members; the release host job also runs the
   extracted Linux artifact through the installed-binary smoke journey.
+- Bounded MCP workspace diffs to 10,000 inspected rows per compared database
+  and removed unnecessary checkpoint writes from history and diff reads.
 - Keep a workspace lock for the full lifetime of CLI and MCP ownership, closing
   the undo window where another process could write while a recovery snapshot is
   being installed.

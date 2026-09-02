@@ -220,7 +220,8 @@ database-level snapshot diff. The output should state its precision honestly.
 - Structured-data imports are explicit, content-based, bounded, and recoverable;
   MCP never accepts an arbitrary source path or SQL dump as an import payload.
 - Requests have limits for SQL size, rows, statements, mutation count, and
-  output size.
+  output size; MCP workspace diffs also cap the rows inspected in each
+  compared database.
 - A failed preview never changes durable state.
 - An applied operation always has a recovery point or fails before mutation.
 - Exact import, apply, and undo retries return the original receipt only when

@@ -190,7 +190,7 @@ Workspace mode also provides:
 | `workspace_preview` | Execute a bounded mutation in isolation and save its exact plan | Plan metadata only |
 | `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
 | `workspace_history` | Read the change ledger and recovery statuses | Recovery metadata may be reconciled |
-| `workspace_diff` | Compare a change recovery point with current state | No |
+| `workspace_diff` | Compare a change recovery point with current state; bounded to 10,000 rows across each compared database | Recovery metadata may be reconciled |
 | `workspace_undo` | Restore the latest committed change's recovery point | Yes; requires approval |
 | `workspace_export` | Return one table as bounded CSV, JSON Lines, or SQL content | No |
 
@@ -228,6 +228,13 @@ split into separately reviewed plans.
 
 Workspace exports return at most 10,000 rows and 1 MiB of raw content before
 the MCP response-size check. Use the CLI export for larger tables or files.
+
+Workspace diffs inspect the logical contents of a recovery point and the
+current database. MCP diffs inspect at most 10,000 rows in each compared
+database and reject larger workspaces before building the comparison; use the
+CLI diff when a complete large-workspace comparison is intentional. History
+and diff may reconcile an interrupted operation's metadata, but they do not
+apply data changes and do not require `--allow-writes`.
 
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the

@@ -799,7 +799,7 @@ impl BasaltMcp {
     /// Compare a committed change recovery point with current workspace state.
     #[tool(
         name = "workspace_diff",
-        description = "Compare a committed workspace change recovery point with the current state at table level. The result does not claim row-by-row patch precision.",
+        description = "Compare a committed workspace change recovery point with the current state at table level. The result does not claim row-by-row patch precision and refuses comparisons larger than 10,000 rows; use the CLI diff for larger workspaces.",
         annotations(
             title = "Diff workspace change",
             read_only_hint = false,

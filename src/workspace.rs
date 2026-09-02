@@ -36,6 +36,7 @@ const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_STATEMENTS: usize = 64;
 const MAX_PREVIEW_MUTATIONS: usize = 32;
 const MAX_PREVIEW_ROWS: usize = 10_000;
+const MAX_MCP_DIFF_ROWS: usize = 10_000;
 const MAX_MCP_EXPORT_ROWS: usize = 10_000;
 const HISTORY_DIR: &str = "history";
 const PLANS_DIR: &str = "plans";
@@ -1850,7 +1851,6 @@ fn reconcile_changes(
 
 fn history(workspace: &Workspace) -> Result<Vec<HistoryEntry>, WorkspaceError> {
     let database = workspace.database()?;
-    database.checkpoint()?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
     let mut changes = load_changes(workspace)?;
@@ -2027,9 +2027,16 @@ fn diff(
     workspace: &Workspace,
     requested_change_id: Option<&str>,
 ) -> Result<DiffReport, WorkspaceError> {
+    diff_with_row_limit(workspace, requested_change_id, None)
+}
+
+fn diff_with_row_limit(
+    workspace: &Workspace,
+    requested_change_id: Option<&str>,
+    max_total_rows: Option<usize>,
+) -> Result<DiffReport, WorkspaceError> {
     let mut changes = load_changes(workspace)?;
     let database = workspace.database()?;
-    database.checkpoint()?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
     reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
@@ -2062,8 +2069,8 @@ fn diff(
         )));
     }
     let before_database = Database::open(&snapshot)?;
-    let before = logical_snapshot(&before_database)?;
-    let after = logical_snapshot(&database)?;
+    let before = logical_snapshot(&before_database, max_total_rows)?;
+    let after = logical_snapshot(&database, max_total_rows)?;
     let mut names = BTreeSet::new();
     names.extend(before.keys().cloned());
     names.extend(after.keys().cloned());
@@ -2104,10 +2111,21 @@ fn diff(
 
 fn logical_snapshot(
     database: &Database,
+    max_total_rows: Option<usize>,
 ) -> Result<BTreeMap<String, TableSnapshot>, WorkspaceError> {
     let mut tables = BTreeMap::new();
+    let mut total_rows = 0usize;
     for table in database.table_names()? {
-        let (columns, rows) = select_table(database, &table)?;
+        let limit = max_total_rows.map(|limit| limit.saturating_add(1));
+        let (columns, rows) = select_table_with_limit(database, &table, limit)?;
+        if let Some(max_total_rows) = max_total_rows {
+            total_rows = total_rows.saturating_add(rows.len());
+            if total_rows > max_total_rows {
+                return Err(WorkspaceError::Invalid(format!(
+                    "MCP diff is limited to {max_total_rows} rows across a compared database; use the CLI diff for larger workspaces"
+                )));
+            }
+        }
         tables.insert(table, TableSnapshot { columns, rows });
     }
     Ok(tables)
@@ -2309,7 +2327,7 @@ pub(crate) fn mcp_diff(
     workspace: &Workspace,
     change_id: Option<&str>,
 ) -> Result<DiffReport, WorkspaceError> {
-    diff(workspace, change_id)
+    diff_with_row_limit(workspace, change_id, Some(MAX_MCP_DIFF_ROWS))
 }
 
 pub(crate) fn mcp_undo(
