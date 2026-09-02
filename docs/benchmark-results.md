@@ -2,7 +2,7 @@
 
 This is a reproducible evidence snapshot for the selected workspace workflow,
 not a general-purpose database performance claim. It was run on 2026-09-02
-against commit `1e9bc3f` with 10,000 fixture rows and three fresh repetitions:
+against commit `dfe7534` with 10,000 fixture rows and three fresh repetitions:
 
 ```bash
 python3 scripts/benchmark_workspace.py \
@@ -17,13 +17,13 @@ individual run values as well, so the snapshot can be regenerated or audited.
 
 | Operation | Basalt | SQLite | DuckDB |
 | --- | ---: | ---: | ---: |
-| Import | 153.005 | 26.691 | 3879.845 |
-| Aggregate query | 30.758 | 3.662 | 1.581 |
-| Preview | 32.354 | 0.523 | 1.075 |
-| Apply | 81.143 | 10.437 | 43.661 |
-| Diff | 34.897 | 15.224 | 27.627 |
-| Undo | 77.368 | 0.699 | 30.332 |
-| Export | 30.832 | 12.851 | 15.038 |
+| Import | 338.497 | 29.816 | 3898.018 |
+| Aggregate query | 12.629 | 2.007 | 1.734 |
+| Preview | 34.172 | 0.314 | 1.128 |
+| Apply | 88.563 | 10.819 | 41.934 |
+| Diff | 36.851 | 13.509 | 27.875 |
+| Undo | 86.712 | 0.537 | 30.821 |
+| Export | 26.379 | 13.333 | 13.979 |
 
 The process models are intentionally different. Basalt starts a CLI process,
 opens and validates a workspace, and converts output for every operation.
