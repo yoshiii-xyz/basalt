@@ -54,13 +54,14 @@ do not claim an audit was performed when the tool was unavailable.
 
 ## Distribution
 
-`dist-workspace.toml` is the source of truth for the release target matrix and
-installer types. `dist generate` refreshes the checked-in GitHub Actions
-workflow; `dist plan` shows the artifacts without publishing anything. A
-version tag such as `v0.1.0` builds the release archives, shell and PowerShell
+`dist-workspace.toml` is the source of truth for the release target matrix,
+installer types, and immutable action pins. `dist generate` refreshes the
+checked-in GitHub Actions workflow; `dist plan` shows the artifacts without
+publishing anything. A version tag such as `v0.1.0` builds the release
+archives, shell and PowerShell
 installers, and SHA-256 files. The workflow keeps a reviewed least-privilege
 permission override, so `allow-dirty = ["ci"]` is intentional; review that
-override after regenerating the generated file.
+override and archive-verification step after regenerating the generated file.
 
 The package is named `basalt-db` to avoid an existing crates.io name conflict,
 but every archive contains a `basalt` executable. Do not describe a crates.io
