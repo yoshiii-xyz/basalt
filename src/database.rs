@@ -236,6 +236,19 @@ impl Database {
             .ok_or_else(|| dberr(DbErrorKind::UnknownTable, format!("no such table: {table}")))
     }
 
+    /// Return the number of live rows in a table without materializing them.
+    pub fn row_count(&self, table: &str) -> Result<usize, DbError> {
+        let state = self
+            .inner
+            .state
+            .read()
+            .map_err(|_| dberr(DbErrorKind::Transaction, "database state lock poisoned"))?;
+        state
+            .table(table)
+            .map(crate::db::Table::row_count)
+            .ok_or_else(|| dberr(DbErrorKind::UnknownTable, format!("no such table: {table}")))
+    }
+
     fn commit_state(&self, state: State, expected: u64) -> Result<u64, DbError> {
         let _commit = self
             .inner

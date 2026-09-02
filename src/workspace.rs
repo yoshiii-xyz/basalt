@@ -2116,16 +2116,17 @@ fn logical_snapshot(
     let mut tables = BTreeMap::new();
     let mut total_rows = 0usize;
     for table in database.table_names()? {
-        let limit = max_total_rows.map(|limit| limit.saturating_add(1));
-        let (columns, rows) = select_table_with_limit(database, &table, limit)?;
+        let row_count = database.row_count(&table)?;
         if let Some(max_total_rows) = max_total_rows {
-            total_rows = total_rows.saturating_add(rows.len());
+            total_rows = total_rows.saturating_add(row_count);
             if total_rows > max_total_rows {
                 return Err(WorkspaceError::Invalid(format!(
                     "MCP diff is limited to {max_total_rows} rows across a compared database; use the CLI diff for larger workspaces"
                 )));
             }
         }
+        let (columns, rows) = select_table(database, &table)?;
+        debug_assert_eq!(rows.len(), row_count);
         tables.insert(table, TableSnapshot { columns, rows });
     }
     Ok(tables)
@@ -2579,16 +2580,14 @@ pub(crate) fn mcp_export(
         ));
     }
     let database = workspace.database()?;
-    let (columns, rows) = select_table_with_limit(
-        &database,
-        table,
-        Some(MAX_MCP_EXPORT_ROWS.saturating_add(1)),
-    )?;
-    if rows.len() > MAX_MCP_EXPORT_ROWS {
+    let row_count = database.row_count(table)?;
+    if row_count > MAX_MCP_EXPORT_ROWS {
         return Err(WorkspaceError::Invalid(format!(
             "MCP export is limited to {MAX_MCP_EXPORT_ROWS} rows; use the CLI export for larger tables"
         )));
     }
+    let (columns, rows) = select_table(&database, table)?;
+    debug_assert_eq!(rows.len(), row_count);
     let mut output = LimitedBuffer::new(max_content_bytes);
     let result = match format {
         DataFormat::Csv => write_csv(&columns, &rows, &mut output),
@@ -2848,19 +2847,8 @@ fn select_table(
     database: &Database,
     table: &str,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
-    select_table_with_limit(database, table, None)
-}
-
-fn select_table_with_limit(
-    database: &Database,
-    table: &str,
-    limit: Option<usize>,
-) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
     validate_name(table, "table name")?;
-    let sql = match limit {
-        Some(limit) => format!("SELECT * FROM {} LIMIT {limit}", quote_identifier(table)),
-        None => format!("SELECT * FROM {}", quote_identifier(table)),
-    };
+    let sql = format!("SELECT * FROM {}", quote_identifier(table));
     let results = database.execute_sql(&sql)?;
     let Some(StatementResult::Select { columns, rows }) = results.into_iter().next() else {
         return Err(WorkspaceError::Invalid(

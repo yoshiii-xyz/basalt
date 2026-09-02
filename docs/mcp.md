@@ -226,15 +226,17 @@ Workspace previews accept at most 64 statements and 32 mutating statements per
 call. This bounds the impact described by one plan; larger jobs should be
 split into separately reviewed plans.
 
-Workspace exports return at most 10,000 rows and 1 MiB of raw content before
-the MCP response-size check. Use the CLI export for larger tables or files.
+Workspace exports count live rows before materializing them and reject tables
+over 10,000 rows or 1 MiB of raw content before the MCP response-size check.
+Use the CLI export for larger tables or files.
 
 Workspace diffs inspect the logical contents of a recovery point and the
-current database. MCP diffs inspect at most 10,000 rows in each compared
-database and reject larger workspaces before building the comparison; use the
-CLI diff when a complete large-workspace comparison is intentional. History
-and diff may reconcile an interrupted operation's metadata, but they do not
-apply data changes and do not require `--allow-writes`.
+current database. MCP diffs count live rows before materializing either side,
+inspect at most 10,000 rows in each compared database, and reject larger
+workspaces before building the comparison; use the CLI diff when a complete
+large-workspace comparison is intentional. History and diff may reconcile an
+interrupted operation's metadata, but they do not apply data changes and do not
+require `--allow-writes`.
 
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the
