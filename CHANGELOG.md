@@ -37,6 +37,8 @@
   recovery coverage, and reproducible project checks.
 - Added an official `rmcp` stdio server with typed SQL tools, schema resources,
   bounded results, stateful MCP transactions, and wire-level protocol tests.
+- Verified the installed-binary MCP smoke path against modern `2026-07-28`
+  discovery and per-request metadata while retaining legacy handshake coverage.
 - Hardened numeric literal parsing, integer and real overflow handling, and
   recovery from incomplete WAL tails.
 - Added cross-process ownership for durable database paths and documented the

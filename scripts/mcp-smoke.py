@@ -10,6 +10,16 @@ from pathlib import Path
 from typing import Any
 
 
+MODERN_METADATA: dict[str, Any] = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {
+        "name": "basalt-smoke",
+        "version": "1.0.0",
+    },
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
 class McpProcess:
     def __init__(self, binary: str, workspace: Path) -> None:
         self.process = subprocess.Popen(
@@ -56,12 +66,16 @@ class McpProcess:
 
 
 def call(
-    server: McpProcess, request_id: int, name: str, arguments: dict[str, Any]
+    server: McpProcess,
+    request_id: int,
+    name: str,
+    arguments: dict[str, Any],
+    metadata: dict[str, Any],
 ) -> dict[str, Any]:
     result = server.request(
         request_id,
         "tools/call",
-        {"name": name, "arguments": arguments},
+        {"name": name, "arguments": arguments, "_meta": metadata},
     )
     if result.get("isError") is True:
         raise RuntimeError(f"MCP tool {name} failed: {result}")
@@ -79,20 +93,15 @@ def main() -> None:
     workspace = Path(sys.argv[2])
     server = McpProcess(binary, workspace)
     try:
-        initialized = server.request(
+        discovery = server.request(
             1,
-            "initialize",
-            {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "basalt-smoke", "version": "1.0.0"},
-            },
+            "server/discover",
+            {"_meta": MODERN_METADATA},
         )
-        if initialized["serverInfo"]["name"] != "basalt":
-            raise RuntimeError(f"unexpected MCP server: {initialized}")
-        server.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        if "2026-07-28" not in discovery["supportedVersions"]:
+            raise RuntimeError(f"modern MCP protocol was not advertised: {discovery}")
 
-        tools = server.request(2, "tools/list", {})["tools"]
+        tools = server.request(2, "tools/list", {"_meta": MODERN_METADATA})["tools"]
         names = {tool["name"] for tool in tools}
         required = {
             "list_tables",
@@ -116,6 +125,7 @@ def main() -> None:
                 "format": "csv",
                 "content": "id,name\n1,Ada\n",
             },
+            MODERN_METADATA,
         )
         import_change_id = imported["change_id"]
         if imported["summary"] != "table mcp_users (1 rows, 2 columns)":
@@ -126,6 +136,7 @@ def main() -> None:
             4,
             "query",
             {"sql": "SELECT name FROM mcp_users WHERE id = 1"},
+            MODERN_METADATA,
         )
         rows = queried["results"][0]["rows"]
         if rows != [[{"type": "text", "value": "Ada"}]]:
@@ -136,19 +147,38 @@ def main() -> None:
             5,
             "workspace_preview",
             {"sql": "UPDATE mcp_users SET name = 'Grace' WHERE id = 1"},
+            MODERN_METADATA,
         )
         plan_id = preview["plan_id"]
 
-        applied = call(server, 6, "workspace_apply", {"plan_id": plan_id})
+        applied = call(
+            server,
+            6,
+            "workspace_apply",
+            {"plan_id": plan_id},
+            MODERN_METADATA,
+        )
         applied_change_id = applied["change_id"]
         if applied_change_id == import_change_id:
             raise RuntimeError("apply reused the import change identifier")
 
-        diff = call(server, 7, "workspace_diff", {"change_id": applied_change_id})
+        diff = call(
+            server,
+            7,
+            "workspace_diff",
+            {"change_id": applied_change_id},
+            MODERN_METADATA,
+        )
         if diff["state_changed"] is not True:
             raise RuntimeError(f"apply produced no diff: {diff}")
 
-        undone = call(server, 8, "workspace_undo", {"change_id": applied_change_id})
+        undone = call(
+            server,
+            8,
+            "workspace_undo",
+            {"change_id": applied_change_id},
+            MODERN_METADATA,
+        )
         if undone["undone_change_id"] != applied_change_id:
             raise RuntimeError(f"unexpected undo report: {undone}")
 
@@ -157,6 +187,7 @@ def main() -> None:
             9,
             "workspace_export",
             {"table": "mcp_users", "format": "csv"},
+            MODERN_METADATA,
         )
         if exported["content"] != "id,name\n1,Ada\n":
             raise RuntimeError(f"unexpected export content: {exported}")

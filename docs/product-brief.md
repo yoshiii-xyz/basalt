@@ -338,6 +338,7 @@ Primary and current sources reviewed for this decision:
 - [Redis Agent Filesystem](https://github.com/redis/agent-filesystem)
 - [MCP official reference servers](https://github.com/modelcontextprotocol/servers)
 - [MCP Registry](https://modelcontextprotocol.io/registry/about)
+- [MCP 2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
 - [MCP tool annotation guidance](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
 - [MCP roots and filesystem boundaries](https://modelcontextprotocol.io/specification/2025-03-26/client/roots)
 - [redb](https://github.com/cberner/redb)

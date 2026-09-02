@@ -12,6 +12,13 @@ and [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tool
 specifications, including modern discovery requests and compatibility with the
 legacy initialize handshake.
 
+For the current `2026-07-28` protocol, a host can begin with
+`server/discover`; subsequent requests carry the protocol version, client
+identity, and client capabilities in their `_meta` object. Basalt also accepts
+the older `initialize`/`initialized` exchange for legacy hosts. The release
+smoke test exercises the modern path against the installed binary, while the
+wire tests cover both paths.
+
 ## Install
 
 From a Basalt checkout:
