@@ -3,11 +3,11 @@ name = "basalt-db"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "An embedded SQL database and stdio MCP server built from scratch in Rust"
+description = "CLI-first local SQL workspaces for structured data and coding agents"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/joshiii-xyz/basalt"
-keywords = ["database", "embedded", "sql", "mcp", "ai"]
+keywords = ["agents", "cli", "mcp", "sql", "workspace"]
 categories = ["database-implementations", "command-line-utilities"]
 exclude = [".github/", "dist-workspace.toml"]
 
