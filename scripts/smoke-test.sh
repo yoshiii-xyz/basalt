@@ -57,6 +57,16 @@ grep -Fq '"state_changed": true' <<<"$diff_output"
 "$basalt_binary" workspace export --format jsonl "$workspace" users "$exported" >/dev/null
 grep -Fq '{"id":1,"name":"Ada"}' "$exported"
 
+bootstrap_workspace="$temp_root/bootstrap-workspace"
+{
+    printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"basalt-bootstrap-smoke","version":"1.0.0"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_inspect","arguments":{}}}'
+} | "$basalt_binary" mcp --workspace "$bootstrap_workspace" --init-workspace >/dev/null
+[[ -f "$bootstrap_workspace/workspace.json" ]]
+[[ -f "$bootstrap_workspace/data.basalt" ]]
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 python3 "$script_dir/mcp-smoke.py" "$basalt_binary" "$workspace"
 

@@ -61,6 +61,16 @@ impl McpProcess {
         Self::start_with_workspace_env(workspace, allow_writes, None)
     }
 
+    fn start_with_workspace_init(workspace: &Path, allow_writes: bool) -> Self {
+        let workspace = workspace.to_str().expect("workspace path should be UTF-8");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_basalt"));
+        command.args(["mcp", "--workspace", workspace, "--init-workspace"]);
+        if allow_writes {
+            command.arg("--allow-writes");
+        }
+        Self::spawn(command)
+    }
+
     fn start_with_workspace_env(
         workspace: &Path,
         allow_writes: bool,
@@ -750,6 +760,26 @@ fn workspace_mcp_owns_workspace_until_shutdown() {
         available.status.success(),
         "workspace should reopen after MCP shutdown: {available:?}"
     );
+}
+
+#[test]
+fn workspace_mcp_can_initialize_a_missing_workspace() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    assert!(!workspace.exists());
+
+    let mut server = McpProcess::start_with_workspace_init(&workspace, false);
+    initialize_legacy(&mut server);
+    let inspect = server.request(
+        2,
+        "tools/call",
+        json!({"name": "workspace_inspect", "arguments": {}}),
+    );
+    assert!(result(&inspect)["structuredContent"]["tables"].is_array());
+    server.close();
+
+    assert!(workspace.join("workspace.json").is_file());
+    assert!(workspace.join("data.basalt").is_file());
 }
 
 #[test]

@@ -238,6 +238,16 @@ impl Workspace {
         })
     }
 
+    /// Open a workspace, creating it only when the requested path is missing.
+    pub fn open_or_init(path: impl AsRef<Path>) -> Result<Workspace, WorkspaceError> {
+        let path = path.as_ref().to_path_buf();
+        match Self::open(&path) {
+            Ok(workspace) => Ok(workspace),
+            Err(_error) if !path.exists() => Self::init(path),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -3515,6 +3525,26 @@ mod tests {
             String::from_utf8(manifest_bytes(&manifest).unwrap()).unwrap(),
             "{\n  \"format_version\": 1,\n  \"database\": \"data.basalt\"\n}\n"
         );
+    }
+
+    #[test]
+    fn open_or_init_does_not_replace_existing_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-open-or-init-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("keep.txt");
+        fs::write(&marker, b"keep").unwrap();
+
+        let error = Workspace::open_or_init(&root).unwrap_err();
+        assert!(error.to_string().contains("not a Basalt workspace"));
+        assert_eq!(fs::read(&marker).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

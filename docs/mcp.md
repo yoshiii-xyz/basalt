@@ -41,7 +41,7 @@ Claude Code can register a project-scoped server without hand-editing JSON:
 
 ```bash
 claude mcp add basalt --scope project -- \
-  basalt mcp --workspace "$PWD/.basalt-workspace"
+  basalt mcp --workspace "$PWD/.basalt-workspace" --init-workspace
 ```
 
 This writes the project's `.mcp.json`; Claude Code may ask for approval before
@@ -68,6 +68,30 @@ the only data location the workspace tools can open:
   }
 }
 ```
+
+For a new project, add `--init-workspace` to let the server create the
+workspace on first start:
+
+```json
+{
+  "mcpServers": {
+    "basalt": {
+      "command": "basalt",
+      "args": [
+        "mcp",
+        "--workspace",
+        "/absolute/path/to/project-data",
+        "--init-workspace"
+      ]
+    }
+  }
+}
+```
+
+This flag creates only a missing path. It never replaces an existing directory,
+manifest, or database; an existing invalid workspace still fails clearly. It
+is an explicit bootstrap convenience, not a permission to discover or create
+arbitrary paths.
 
 Workspace mode is read-only with respect to data by default. `workspace_preview`
 may create a local plan record, but it does not change database state. Add

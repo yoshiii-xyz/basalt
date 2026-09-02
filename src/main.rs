@@ -76,8 +76,14 @@ fn run_mcp(args: &[String]) {
         return;
     }
 
+    let init_workspace = options.init_workspace;
     let result = if let Some(path) = options.workspace {
-        match basalt::workspace::Workspace::open(path) {
+        let workspace = if init_workspace {
+            basalt::workspace::Workspace::open_or_init(path)
+        } else {
+            basalt::workspace::Workspace::open(path)
+        };
+        match workspace {
             Ok(workspace) => basalt::mcp::run_workspace(workspace, options.allow_writes),
             Err(error) => Err(format!("could not open workspace: {error}")),
         }

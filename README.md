@@ -149,19 +149,27 @@ explicit preview/apply lifecycle for writes.
   "mcpServers": {
     "basalt": {
       "command": "basalt",
-      "args": ["mcp", "--workspace", "/absolute/path/to/project-data"]
+      "args": [
+        "mcp",
+        "--workspace",
+        "/absolute/path/to/project-data",
+        "--init-workspace"
+      ]
     }
   }
 }
 ```
 
-Add `"--allow-writes"` only when the host has an explicit operator approval
-policy for applying workspace plans and undoing changes. Direct database mode
-is still available with `"args": ["mcp", "/absolute/path/to/app.basalt"]`, but
-it is read-only by default; `execute` and `checkpoint` require the same flag.
-Use `"args": ["mcp", ":memory:"]` for an ephemeral direct-mode session. The
-installed binary is preferred for host configuration; running from a checkout
-is also possible with `cargo run --quiet -- mcp --workspace /absolute/path/to/project-data`.
+`--init-workspace` creates the configured workspace only when its path does not
+exist; it never replaces an existing directory or manifest. Omit it when the
+workspace must be provisioned separately. Add `"--allow-writes"` only when the
+host has an explicit operator approval policy for applying workspace plans and
+undoing changes. Direct database mode is still available with `"args": ["mcp",
+"/absolute/path/to/app.basalt"]`, but it is read-only by default; `execute` and
+`checkpoint` require the same flag. Use `"args": ["mcp", ":memory:"]` for an
+ephemeral direct-mode session. The installed binary is preferred for host
+configuration; running from a checkout is also possible with `cargo run --quiet
+-- mcp --workspace /absolute/path/to/project-data`.
 
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
 `workspace_preview`, `workspace_apply`, `workspace_history`, `workspace_diff`,

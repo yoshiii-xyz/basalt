@@ -184,7 +184,8 @@ SQL.
 format/version marker. A workspace has one canonical database path and a small
 metadata/history area. The layout is documented and safe to delete or copy
 after its owning process has stopped; lock sidecars must not be replaced while
-it is open.
+it is open. MCP may use `--init-workspace` to create the configured path only
+when it is missing; it never replaces an existing directory or manifest.
 
 ### Import and export
 

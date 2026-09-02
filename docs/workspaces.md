@@ -152,3 +152,8 @@ MCP imports accept bounded CSV, JSON, or JSON Lines content and require
 SQL dump imports remain CLI-only. MCP writes return bounded structured results.
 The reversible lifecycle is local and single-process. See
 [the MCP contract](mcp.md) for the agent-facing sequence and approval boundary.
+
+An MCP host can create a new workspace on first start by passing
+`--init-workspace` with `--workspace PATH`. This initializes only a missing
+path; existing directories are opened normally and invalid manifests are not
+replaced.

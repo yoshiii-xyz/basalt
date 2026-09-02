@@ -114,8 +114,8 @@ artifact and rerun validation whenever its version changes.
    or use a published release installer.
 2. Run `bash scripts/smoke-test.sh /path/to/basalt` against the installed
    binary. It covers version output, workspace import/query, reversible
-   mutation, export, read-only MCP discovery, and a process-level writable MCP
-   import/preview/apply/diff/undo/export journey.
+   mutation, export, MCP bootstrap, read-only MCP discovery, and a process-level
+   writable MCP import/preview/apply/diff/undo/export journey.
 3. Create a durable database with the CLI, query it in table/CSV/JSON-lines
    modes, close it, and query it again.
 4. Create a workspace, import a representative CSV or JSON Lines file,

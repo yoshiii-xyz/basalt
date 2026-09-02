@@ -29,7 +29,7 @@ use crate::types::{ColumnType, Value};
 pub const HELP: &str = "Basalt MCP server\n\n\
 Usage:\n  basalt mcp [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Options:\n  -d, --database PATH  Database path (default: :memory:)\n  -h, --help           Print this help\n\n\
-Workspace mode:\n  --workspace PATH     Open a Basalt workspace (read-only by default)\n  --allow-writes       Enable workspace apply/undo and direct SQL writes\n\n\
+Workspace mode:\n  --workspace PATH     Open a Basalt workspace (read-only by default)\n  --init-workspace     Create --workspace PATH when it does not exist\n  --allow-writes       Enable workspace apply/undo and direct SQL writes\n\n\
 The server speaks MCP over stdin/stdout. Diagnostics go to stderr.\n";
 
 const DEFAULT_MAX_ROWS: usize = 100;
@@ -45,6 +45,7 @@ const SCHEMA_URI: &str = "basalt://schema";
 pub struct McpOptions {
     pub database: String,
     pub workspace: Option<String>,
+    pub init_workspace: bool,
     pub allow_writes: bool,
     pub help: bool,
 }
@@ -54,6 +55,7 @@ impl Default for McpOptions {
         Self {
             database: ":memory:".into(),
             workspace: None,
+            init_workspace: false,
             allow_writes: false,
             help: false,
         }
@@ -65,6 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
     let mut options = McpOptions::default();
     let mut database = None;
     let mut workspace = None;
+    let mut init_workspace = false;
     let mut allow_writes = false;
     let mut positional_only = false;
     let mut index = 0;
@@ -102,6 +105,11 @@ pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
                     index += 1;
                     continue;
                 }
+                "--init-workspace" => {
+                    init_workspace = true;
+                    index += 1;
+                    continue;
+                }
                 "--allow-writes" | "--write" => {
                     allow_writes = true;
                     index += 1;
@@ -136,10 +144,16 @@ pub fn parse_args(args: &[String]) -> Result<McpOptions, McpCliError> {
             "choose --workspace or --database, not both",
         ));
     }
+    if init_workspace && workspace.is_none() {
+        return Err(McpCliError::new(
+            "--init-workspace requires --workspace PATH",
+        ));
+    }
     if let Some(database) = database {
         options.database = database;
     }
     options.workspace = workspace;
+    options.init_workspace = init_workspace;
     options.allow_writes = allow_writes;
     Ok(options)
 }
@@ -1282,6 +1296,7 @@ mod tests {
         let options = parse_args(&[]).unwrap();
         assert_eq!(options.database, ":memory:");
         assert_eq!(options.workspace, None);
+        assert!(!options.init_workspace);
         assert!(!options.allow_writes);
     }
 
@@ -1308,8 +1323,27 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(options.workspace.as_deref(), Some(".basalt-workspace"));
+        assert!(!options.init_workspace);
         assert!(options.allow_writes);
         assert_eq!(options.database, ":memory:");
+    }
+
+    #[test]
+    fn mcp_accepts_explicit_workspace_initialization() {
+        let options = parse_args(&args(&[
+            "--workspace",
+            ".basalt-workspace",
+            "--init-workspace",
+        ]))
+        .unwrap();
+        assert_eq!(options.workspace.as_deref(), Some(".basalt-workspace"));
+        assert!(options.init_workspace);
+    }
+
+    #[test]
+    fn mcp_rejects_workspace_initialization_without_workspace_mode() {
+        let error = parse_args(&args(&["--init-workspace"])).unwrap_err();
+        assert!(error.to_string().contains("requires --workspace"));
     }
 
     #[test]
