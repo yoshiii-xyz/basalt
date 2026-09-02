@@ -5,6 +5,8 @@
 - Made exact workspace apply and undo retries return the original receipt after
   a lost response, while rejecting retries against moved workspace state; MCP
   metadata now advertises those retries as idempotent.
+- Made bounded workspace MCP imports return their original receipt on an exact
+  retry after a lost response by persisting an import request fingerprint.
 - Corrected the MCP workspace import annotation to identify it as additive
   rather than destructive, with a wire-level regression check.
 - Added versioned local workspaces with `basalt init`, read-only workspace

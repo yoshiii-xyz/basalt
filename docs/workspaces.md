@@ -98,10 +98,11 @@ Undo restores only the latest committed change and refuses to remove later
 work. Diffs are honest table-level logical comparisons: they report schema and
 data changes for affected tables, not a row-by-row patch.
 
-Apply and undo are safe to retry after a lost response. Their identifiers are
-deterministic: an exact retry returns the original receipt while the workspace
-is still at the recorded post-operation state. If the workspace moved, Basalt
-rejects the retry instead of replaying or discarding later work.
+Imports, apply, and undo are safe to retry after a lost response. Their
+identifiers and persisted request metadata make an exact retry return the
+original receipt while the workspace is still at the recorded post-operation
+state. If the workspace moved, Basalt rejects the retry instead of replaying
+or discarding later work.
 
 Plans, change records, and recovery snapshots live below `history/` and use
 the workspace format version. They are local implementation metadata; the

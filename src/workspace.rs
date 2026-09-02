@@ -1237,6 +1237,15 @@ impl From<&PlanRecord> for PlanReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImportMetadata {
+    request_key: String,
+    format: String,
+    table: String,
+    bytes: usize,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChangeRecord {
     format_version: u32,
     sequence: u64,
@@ -1253,6 +1262,8 @@ struct ChangeRecord {
     committed_generation: Option<u64>,
     after_state: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    import: Option<ImportMetadata>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1582,6 +1593,21 @@ fn import_change_id(base_state: &str, format: DataFormat, table: &str, content: 
         .collect()
 }
 
+fn import_request_key(format: DataFormat, table: &str, content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-import-request-v1\0");
+    hasher.update(format.name().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(table.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(content);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn apply_change_id(plan_id: &str, base_state: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"basalt-apply-v1\0");
@@ -1891,6 +1917,7 @@ fn apply_plan(
         committed_generation: None,
         after_state: None,
         error: None,
+        import: None,
     };
     if change_file.exists() {
         write_atomic_json(&change_file, &change)?;
@@ -2153,6 +2180,7 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
         committed_generation: None,
         after_state: None,
         error: None,
+        import: None,
     };
     if undo_file.exists() {
         write_atomic_json(&undo_file, &undo_record)?;
@@ -2272,7 +2300,7 @@ pub(crate) fn mcp_import(
 
     // Parse and type-check before touching the durable workspace. This keeps a
     // malformed agent payload from creating a failed history record.
-    validate_mcp_import(format, table, bytes)?;
+    let validated_summary = validate_mcp_import(format, table, bytes)?;
 
     let database = workspace.database()?;
     database.checkpoint()?;
@@ -2281,6 +2309,41 @@ pub(crate) fn mcp_import(
     ensure_history_dirs(workspace)?;
     let mut changes = load_changes(workspace)?;
     reconcile_changes(workspace, &mut changes, &base_state, base_generation)?;
+
+    let request_key = import_request_key(format, table, bytes);
+    if let Some(existing) = changes.iter().rev().find(|change| {
+        change
+            .import
+            .as_ref()
+            .is_some_and(|import| import.request_key == request_key)
+    }) && existing.status.is_committed()
+    {
+        if existing.after_state.as_deref() != Some(base_state.as_str()) {
+            return Err(WorkspaceError::Invalid(format!(
+                "import has already been committed as {}; workspace state moved, so it will not be replayed",
+                existing.change_id
+            )));
+        }
+        let import = existing.import.as_ref().ok_or_else(|| {
+            WorkspaceError::Invalid("committed import is missing its metadata".to_string())
+        })?;
+        let after_state = existing.after_state.clone().ok_or_else(|| {
+            WorkspaceError::Invalid("committed import is missing its after-state".to_string())
+        })?;
+        let generation = existing.committed_generation.ok_or_else(|| {
+            WorkspaceError::Invalid("committed import is missing its generation".to_string())
+        })?;
+        return Ok(ImportReport {
+            change_id: existing.change_id.clone(),
+            format: import.format.clone(),
+            table: import.table.clone(),
+            bytes: import.bytes,
+            summary: import.summary.clone(),
+            base_state: existing.base_state.clone(),
+            after_state,
+            generation,
+        });
+    }
 
     let change_id = import_change_id(&base_state, format, table, bytes);
     if let Some(existing) = changes.iter().find(|change| change.change_id == change_id) {
@@ -2323,6 +2386,13 @@ pub(crate) fn mcp_import(
         committed_generation: None,
         after_state: None,
         error: None,
+        import: Some(ImportMetadata {
+            request_key,
+            format: format.name().to_string(),
+            table: table.to_string(),
+            bytes: bytes.len(),
+            summary: validated_summary,
+        }),
     };
     write_new_json(&change_file, &change)?;
 
@@ -2382,7 +2452,7 @@ fn validate_mcp_import(
     format: DataFormat,
     table: &str,
     bytes: &[u8],
-) -> Result<(), WorkspaceError> {
+) -> Result<String, WorkspaceError> {
     let database = Database::in_memory();
     match format {
         DataFormat::Csv => import_csv(&database, Some(table), bytes),
@@ -2390,7 +2460,7 @@ fn validate_mcp_import(
         DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes),
         DataFormat::Sql => unreachable!(),
     }
-    .map(|_| ())
+    .map(|summary| summary.unwrap_or_else(|| "import completed".to_string()))
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

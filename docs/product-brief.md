@@ -219,8 +219,8 @@ database-level snapshot diff. The output should state its precision honestly.
   output size.
 - A failed preview never changes durable state.
 - An applied operation always has a recovery point or fails before mutation.
-- Exact apply and undo retries return the original receipt only when the
-  workspace is still at the recorded post-operation state; moved state is
+- Exact import, apply, and undo retries return the original receipt only when
+  the workspace is still at the recorded post-operation state; moved state is
   rejected rather than replayed.
 - History and diagnostics never pollute MCP stdout.
 

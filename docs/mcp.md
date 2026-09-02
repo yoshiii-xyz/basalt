@@ -195,19 +195,21 @@ provide a multi-call SQL transaction; the durable plan and recovery lifecycle
 is the transaction boundary. `workspace_apply` rejects stale plans and never
 silently applies a mutation against a changed base state.
 
-The apply and undo calls are retry-safe for lost responses. Their identifiers
-are deterministic: an exact retry returns the original receipt when the
-workspace is still at the recorded post-operation state. If later work moved
-the workspace, Basalt rejects the retry rather than replaying or discarding
+The import, apply, and undo calls are retry-safe for lost responses. Their
+identifiers and persisted request metadata let an exact retry return the
+original receipt when the workspace is still at the recorded post-operation
+state. If later work moved the workspace, Basalt does not replay or discard
 that work. Tool annotations remain hints; the state and identifier checks are
 the enforcement boundary.
 
 `workspace_import` is an explicit atomic ingress operation rather than a raw
 SQL escape hatch. It requires `--allow-writes`, creates a new table, and stores
-the pre-import recovery point in workspace history. Use `workspace_undo` to
-reverse it while it is the latest committed change. SQL dump imports remain a
-CLI-only operation because they can contain arbitrary DDL and DML; use the
-preview/apply lifecycle for SQL changes through MCP.
+the pre-import recovery point in workspace history. An exact retry after a
+lost response returns the original import receipt while the workspace remains
+at the recorded result; it never imports the table twice. Use
+`workspace_undo` to reverse it while it is the latest committed change. SQL
+dump imports remain a CLI-only operation because they can contain arbitrary
+DDL and DML; use the preview/apply lifecycle for SQL changes through MCP.
 
 In direct database mode, all SQL tools operate on one connection for the
 lifetime of the MCP process. When `--allow-writes` is enabled, transactions can

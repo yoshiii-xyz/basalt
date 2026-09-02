@@ -407,6 +407,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         workspace_import_tool["annotations"]["destructiveHint"],
         false
     );
+    assert_eq!(workspace_import_tool["annotations"]["idempotentHint"], true);
 
     for name in ["workspace_apply", "workspace_undo"] {
         let tool = result(&tools)["tools"]
@@ -474,6 +475,28 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert_eq!(
         result(&imported)["structuredContent"]["summary"],
         "table users (1 rows, 2 columns)"
+    );
+
+    let retried_import = writable.request(
+        13,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert_ne!(
+        result(&retried_import)["isError"],
+        true,
+        "import retry failed: {retried_import}"
+    );
+    assert_eq!(
+        result(&retried_import)["structuredContent"],
+        result(&imported)["structuredContent"]
     );
 
     let inspect = writable.request(
@@ -545,6 +568,26 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert_eq!(
         result(&retried_apply)["structuredContent"]["change_id"],
         change_id
+    );
+
+    let moved_import = writable.request(
+        14,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert_eq!(result(&moved_import)["isError"], true);
+    assert!(
+        result(&moved_import)["content"][0]["text"]
+            .as_str()
+            .expect("moved import rejection should include text")
+            .contains("state moved")
     );
 
     let changed = writable.request(
@@ -786,6 +829,24 @@ fn workspace_mcp_import_reconciles_an_interrupted_commit() {
     assert_eq!(
         result(&query)["structuredContent"]["results"][0]["rows"][0][0],
         json!({"type": "text", "value": "Ada"})
+    );
+
+    let retried_import = recovered.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert_ne!(result(&retried_import)["isError"], true);
+    assert_eq!(
+        result(&retried_import)["structuredContent"]["change_id"],
+        change_id
     );
 
     let undo = recovered.request(
