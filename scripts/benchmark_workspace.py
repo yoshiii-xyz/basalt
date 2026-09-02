@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 QUERY = (
     "SELECT bucket, COUNT(*), SUM(value) FROM events "
-    "WHERE value >= 5000 GROUP BY bucket ORDER BY bucket"
+    "WHERE value >= 0 GROUP BY bucket ORDER BY bucket"
 )
 UPDATE = "UPDATE events SET label = 'reviewed' WHERE id <= 1000"
 

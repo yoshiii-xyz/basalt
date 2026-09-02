@@ -157,6 +157,7 @@ Workspace mode also provides:
 
 | Tool | Use | Mutates data |
 | --- | --- | --- |
+| `workspace_import` | Import bounded CSV, JSON, or JSON Lines content into a new table and create a recovery point | Yes; requires approval |
 | `workspace_inspect` | Read workspace metadata, schema, and row counts | No |
 | `workspace_preview` | Execute a bounded mutation in isolation and save its exact plan | Plan metadata only |
 | `workspace_apply` | Apply one exact plan and create a recovery point | Yes; requires approval |
@@ -171,17 +172,28 @@ workspace lifecycle.
 
 In workspace mode, use this sequence:
 
-1. Call `workspace_inspect` or `query` to understand the current data.
-2. Call `workspace_preview` with the mutation. Keep the returned `plan_id`.
-3. Have the operator approve the exact plan, then call `workspace_apply`.
-4. Use `workspace_history` and `workspace_diff` to inspect the committed change.
-5. Call `workspace_undo` with the latest change ID if the change should be
+1. When data is not already present, call `workspace_import` with an explicit
+   table, format, and content payload. The tool accepts only CSV, JSON, or
+   JSON Lines, caps content at 16 MiB, never accepts a filesystem path, and
+   returns a recoverable `change_id`.
+2. Call `workspace_inspect` or `query` to understand the current data.
+3. Call `workspace_preview` with the mutation. Keep the returned `plan_id`.
+4. Have the operator approve the exact plan, then call `workspace_apply`.
+5. Use `workspace_history` and `workspace_diff` to inspect the committed change.
+6. Call `workspace_undo` with the latest change ID if the change should be
    reversed.
 
 Workspace SQL calls open the workspace for one operation at a time. They do not
 provide a multi-call SQL transaction; the durable plan and recovery lifecycle
 is the transaction boundary. `workspace_apply` rejects stale plans and never
 silently applies a mutation against a changed base state.
+
+`workspace_import` is an explicit atomic ingress operation rather than a raw
+SQL escape hatch. It requires `--allow-writes`, creates a new table, and stores
+the pre-import recovery point in workspace history. Use `workspace_undo` to
+reverse it while it is the latest committed change. SQL dump imports remain a
+CLI-only operation because they can contain arbitrary DDL and DML; use the
+preview/apply lifecycle for SQL changes through MCP.
 
 In direct database mode, all SQL tools operate on one connection for the
 lifetime of the MCP process. When `--allow-writes` is enabled, transactions can
@@ -228,9 +240,10 @@ intends the agent to access. Tool annotations are hints for host UIs; Basalt
 also enforces the write flag itself. No host-specific approval behavior is
 assumed.
 
-Workspace export returns content rather than accepting an output path. This
-keeps the workspace MCP surface from becoming an arbitrary filesystem writer.
-The CLI export command remains available when a user intentionally chooses a
+Workspace import and export exchange content rather than accepting filesystem
+paths. This keeps the workspace MCP surface from becoming an arbitrary
+filesystem reader or writer. Imports are explicit, bounded, and recoverable;
+the CLI commands remain available when a user intentionally chooses a source or
 destination.
 
 Use a durable path for work that must survive process restarts. Basalt appends

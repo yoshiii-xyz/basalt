@@ -186,6 +186,8 @@ database-level snapshot diff. The output should state its precision honestly.
 - MCP starts read-only unless the operator explicitly enables writes.
 - Write tools have separate names and accurate risk annotations.
 - Workspace paths are explicit and cannot escape the configured workspace.
+- Structured-data imports are explicit, content-based, bounded, and recoverable;
+  MCP never accepts an arbitrary source path or SQL dump as an import payload.
 - Requests have limits for SQL size, rows, statements, mutation count, and
   output size.
 - A failed preview never changes durable state.
@@ -239,18 +241,16 @@ an ingestion script or knowing the internal file layout.
   reconciliation are implemented and covered by failure-injection tests.
 - Milestone 4 is complete: workspace-aware MCP tools are scoped by mode,
   read-only by default, bounded, typed, and covered by stdio wire tests for the
-  full inspect-to-undo journey.
-- Milestone 5 remains open: incumbent benchmarks, differential/fuzz coverage,
-  and a published release still need to be completed. Package contents,
-  release generation, dependency auditing, and the clean-binary smoke path are
-  now implemented and verified locally. The benchmark harness is now
-  present; its DuckDB baseline remains explicitly optional when that client is
-  unavailable in the execution environment, and the first full local run
-  completed against SQLite and DuckDB. The supported-subset differential checks
-  and compatibility policy are now implemented; persistence fuzzing and the
-  published release remain open. The parser and snapshot fuzz targets are now
-  implemented; a bounded fuzz campaign still needs to be run in a toolchain
-  that has cargo-fuzz available.
+  full ingest-to-undo journey without shelling out. Workspace MCP imports are
+  limited to structured row formats, require explicit writes, and create
+  recovery points.
+- Milestone 5 remains open only for publication and hosted release evidence.
+  The incumbent benchmark harness and first SQLite/DuckDB run are complete;
+  supported-subset differential checks, compatibility policy, parser and
+  snapshot fuzz targets, bounded campaigns, package contents, release
+  generation, dependency auditing, MSRV checking, and clean-binary smoke tests
+  are implemented and verified locally. No public release or adoption claim is
+  made until a release is actually published and exercised by external users.
 
 ### Milestone 3 — Reversible state
 
@@ -266,14 +266,15 @@ boundary.
 ### Milestone 4 — Agent surface
 
 - Make MCP read-only by default; require an explicit write policy.
-- Add inspect, preview, apply, history/diff, undo, and export tools only when
-  each has a complete deterministic implementation.
+- Add bounded structured-data import, inspect, preview, apply, history/diff,
+  undo, and export tools only when each has a complete deterministic
+  implementation.
 - Keep query results bounded and typed.
 - Add workspace path/capability checks and exact MCP wire tests.
 - Document the approval and recovery model for Claude Code, Codex, Cursor, and
   generic MCP hosts without assuming host-specific behavior.
 
-Exit condition: an agent can complete the same inspect-to-undo workflow over
+Exit condition: an agent can complete the same ingest-to-undo workflow over
 stdio MCP without shelling out or receiving ambiguous tool results.
 
 ### Milestone 5 — Trust and distribution
@@ -295,7 +296,8 @@ operation.
 The release is complete only when all of these are true:
 
 1. The primary user can finish the full workspace workflow using only the CLI.
-2. The same workflow works through MCP with no raw filesystem escape hatch.
+2. The same ingest-to-undo workflow works through MCP with no raw filesystem
+   escape hatch.
 3. Previewed writes are exact enough to explain and cannot silently change the
    workspace before apply.
 4. Every applied write has a tested recovery path.

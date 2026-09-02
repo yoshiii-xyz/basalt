@@ -62,10 +62,13 @@ mcp_output=$(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"basalt-smoke","version":"1.0.0"}}}' \
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workspace_inspect","arguments":{}}}'
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workspace_import","arguments":{"table":"other","format":"csv","content":"id\n1\n"}}}' \
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workspace_inspect","arguments":{}}}'
     } | "$basalt_binary" mcp --workspace "$workspace"
 )
 grep -Fq '"serverInfo"' <<<"$mcp_output"
+grep -Fq '"workspace_import"' <<<"$mcp_output"
+grep -Fq 'writes are disabled' <<<"$mcp_output"
 grep -Fq '"workspace_preview"' <<<"$mcp_output"
 grep -Fq '"workspace_inspect"' <<<"$mcp_output"
 grep -Fq '"users"' <<<"$mcp_output"

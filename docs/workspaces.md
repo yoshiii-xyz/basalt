@@ -121,7 +121,9 @@ output file.
 
 The workspace foundation provides `init`, `inspect`, read-only `query`,
 `preview`, `apply`, `history`, `diff`, `undo`, `import`, and `export`. The same
-inspect-to-undo lifecycle is available through `basalt mcp --workspace PATH`;
-MCP writes require `--allow-writes` and return bounded structured results. The
-reversible lifecycle is local and single-process. See [the MCP contract](mcp.md)
-for the agent-facing sequence and approval boundary.
+ingest-to-undo lifecycle is available through `basalt mcp --workspace PATH`;
+MCP imports accept bounded CSV, JSON, or JSON Lines content and require
+`--allow-writes`. They create a recovery point and return a change ID, while
+SQL dump imports remain CLI-only. MCP writes return bounded structured results.
+The reversible lifecycle is local and single-process. See
+[the MCP contract](mcp.md) for the agent-facing sequence and approval boundary.

@@ -72,9 +72,11 @@ been published.
    `initialize`), `tools/list`, `tools/call`, `resources/list`, and
    `resources/read` over newline-delimited JSON-RPC on stdout. Confirm direct
    writes are denied until `--allow-writes` is supplied.
-7. Create a workspace and verify the same MCP process can inspect, preview,
-   apply, diff, undo, and export without an arbitrary output path. Confirm
-   workspace mode does not list the unrestricted `execute` tool.
+7. Create an empty workspace and verify the same MCP process can import bounded
+   structured content, inspect, preview, apply, diff, undo, and export without
+   arbitrary filesystem paths. Confirm workspace mode does not list the
+   unrestricted `execute` tool and denies the import until `--allow-writes` is
+   supplied.
 8. Verify a durable MCP database survives a server restart and that all
    diagnostics stay off stdout.
 

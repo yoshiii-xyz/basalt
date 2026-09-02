@@ -31,8 +31,8 @@ not a SQLite-compatible replacement or a hosted database.
 - Interactive and scriptable CLI output in table, CSV, and JSON-lines formats.
 - Portable workspaces with versioned metadata and atomic CSV, JSON/JSONL, and
   SQL dump import/export.
-- Installable MCP server with typed SQL tools, schema resources, bounded
-  results, and stateful transactions over one agent session.
+- Installable MCP server with typed SQL tools, bounded workspace imports and
+  exports, schema resources, and recoverable agent changes.
 
 ## Installation
 
@@ -102,9 +102,10 @@ basalt workspace query --json .basalt-workspace "SELECT * FROM issues ORDER BY i
 basalt workspace export .basalt-workspace issues issues.jsonl
 ```
 
-Imports are atomic and exports are deterministic. Writes can be previewed,
-applied by exact plan ID, inspected in history, diffed at table level, and
-undone when they are the latest change. See
+Imports are atomic and exports are deterministic. Workspace MCP imports create
+recoverable workspace changes; CLI imports remain the direct local ingestion
+path. Later writes can be previewed, applied by exact plan ID, inspected in
+history, diffed at table level, and undone when they are the latest change. See
 [docs/workspaces.md](docs/workspaces.md) for the format and boundaries.
 
 ## MCP server
@@ -139,10 +140,10 @@ Use `"args": ["mcp", ":memory:"]` for an ephemeral direct-mode session. The
 installed binary is preferred for host configuration; running from a checkout
 is also possible with `cargo run --quiet -- mcp --workspace /absolute/path/to/project-data`.
 
-Workspace mode exposes `workspace_inspect`, `workspace_preview`,
-`workspace_apply`, `workspace_history`, `workspace_diff`, `workspace_undo`, and
-`workspace_export`, alongside bounded `query`, `list_tables`, and
-`describe_table` tools. It also exposes the current schema at
+Workspace mode exposes `workspace_import`, `workspace_inspect`,
+`workspace_preview`, `workspace_apply`, `workspace_history`, `workspace_diff`,
+`workspace_undo`, and `workspace_export`, alongside bounded `query`,
+`list_tables`, and `describe_table` tools. It also exposes the current schema at
 `basalt://schema`. See [docs/mcp.md](docs/mcp.md) for the complete tool
 contract, configuration details, approval boundary, and troubleshooting.
 

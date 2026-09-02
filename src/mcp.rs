@@ -271,6 +271,16 @@ struct WorkspaceSqlInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct WorkspaceImportInput {
+    /// New table name for the imported rows. The table must not already exist.
+    table: String,
+    /// `csv`, `json`, or `jsonl`.
+    format: String,
+    /// UTF-8 input content. MCP imports are capped at 16 MiB and never read a filesystem path.
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct PlanInput {
     /// The exact plan identifier returned by workspace_preview.
     plan_id: String,
@@ -416,6 +426,7 @@ impl BasaltMcp {
                 "workspace_export",
                 "workspace_history",
                 "workspace_inspect",
+                "workspace_import",
                 "workspace_preview",
                 "workspace_undo",
             ] {
@@ -657,6 +668,50 @@ impl BasaltMcp {
         Ok(Json(response))
     }
 
+    /// Import bounded structured-data content into a workspace with recovery.
+    #[tool(
+        name = "workspace_import",
+        description = "Import bounded UTF-8 CSV, JSON, or JSON Lines content into a new workspace table and create a recoverable change record. No filesystem path is accepted. Writes are disabled unless the MCP process was started with --allow-writes; use the CLI for SQL dump imports.",
+        annotations(
+            title = "Import workspace data",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_import(
+        &self,
+        Parameters(input): Parameters<WorkspaceImportInput>,
+    ) -> Result<Json<crate::workspace::ImportReport>, String> {
+        if !self.allow_writes {
+            return Err(
+                "workspace writes are disabled; restart with --allow-writes after explicit operator approval"
+                    .to_string(),
+            );
+        }
+        if input.content.len() > crate::workspace::MAX_MCP_IMPORT_BYTES {
+            return Err(format!(
+                "MCP import content exceeds the {} MiB limit",
+                crate::workspace::MAX_MCP_IMPORT_BYTES / (1024 * 1024)
+            ));
+        }
+        let workspace = self.target.workspace()?;
+        let response = tokio::task::spawn_blocking(move || {
+            crate::workspace::mcp_import(
+                &workspace,
+                Some(&input.table),
+                &input.format,
+                &input.content,
+            )
+        })
+        .await
+        .map_err(|error| format!("workspace import task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        ensure_output_size(&response, "workspace import")?;
+        Ok(Json(response))
+    }
+
     /// Preview a workspace mutation and persist its exact plan.
     #[tool(
         name = "workspace_preview",
@@ -834,7 +889,7 @@ impl BasaltMcp {
 impl ServerHandler for BasaltMcp {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.target.is_workspace() {
-            "Basalt workspace mode is local and read-only by default. Use query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
+            "Basalt workspace mode is local and read-only by default. Use workspace_import only for approved bounded CSV, JSON, or JSON Lines content, query or workspace_inspect to inspect data, workspace_preview to create an exact write plan, and workspace_apply only when writes are explicitly enabled. Use workspace_history, workspace_diff, and workspace_undo for recovery. Results are bounded."
         } else if self.allow_writes {
             "Basalt direct database mode has write access because --allow-writes was explicitly provided. Use query for read-only SELECT or EXPLAIN SELECT; use execute for writes and transaction control. Results are bounded."
         } else {

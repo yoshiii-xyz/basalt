@@ -28,6 +28,7 @@ const MANIFEST_FILE: &str = "workspace.json";
 const DATABASE_FILE: &str = "data.basalt";
 const FORMAT_VERSION: u32 = 1;
 const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_MCP_IMPORT_BYTES: usize = 16 * 1024 * 1024;
 const IMPORT_BATCH_SIZE: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_STATEMENTS: usize = 64;
@@ -1498,6 +1499,23 @@ fn plan_id_for(base_state: &str, sql: &str) -> String {
         .collect()
 }
 
+fn import_change_id(base_state: &str, format: DataFormat, table: &str, content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"basalt-import-v1\0");
+    hasher.update(base_state.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format.name().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(table.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(content);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn apply_change_id(plan_id: &str, base_state: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"basalt-apply-v1\0");
@@ -2109,6 +2127,163 @@ pub(crate) fn mcp_undo(
     change_id: &str,
 ) -> Result<UndoReport, WorkspaceError> {
     undo(workspace, change_id)
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ImportReport {
+    change_id: String,
+    format: String,
+    table: String,
+    bytes: usize,
+    summary: String,
+    base_state: String,
+    after_state: String,
+    generation: u64,
+}
+
+pub(crate) fn mcp_import(
+    workspace: &Workspace,
+    table: Option<&str>,
+    format: &str,
+    content: &str,
+) -> Result<ImportReport, WorkspaceError> {
+    if content.len() > MAX_MCP_IMPORT_BYTES {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP import content exceeds the {} MiB limit",
+            MAX_MCP_IMPORT_BYTES / (1024 * 1024)
+        )));
+    }
+    let format = DataFormat::parse(format)?;
+    if format == DataFormat::Sql {
+        return Err(WorkspaceError::Usage(
+            "workspace_import accepts csv, json, or jsonl; use the CLI for SQL dump imports"
+                .to_string(),
+        ));
+    }
+    let table = required_mcp_table(table)?;
+    let bytes = content.as_bytes();
+
+    // Parse and type-check before touching the durable workspace. This keeps a
+    // malformed agent payload from creating a failed history record.
+    validate_mcp_import(format, table, bytes)?;
+
+    let database = workspace.database()?;
+    database.checkpoint()?;
+    let base_state = state_fingerprint(&workspace.database_path())?;
+    let base_generation = database.generation();
+    ensure_history_dirs(workspace)?;
+    let mut changes = load_changes(workspace)?;
+    reconcile_changes(workspace, &mut changes, &base_state, base_generation)?;
+
+    let change_id = import_change_id(&base_state, format, table, bytes);
+    if let Some(existing) = changes.iter().find(|change| change.change_id == change_id) {
+        if existing.status.is_committed() {
+            return Err(WorkspaceError::Invalid(format!(
+                "import has already been committed as change {change_id}"
+            )));
+        }
+        return Err(WorkspaceError::Invalid(format!(
+            "import already has a history record with status {:?}; inspect workspace_history before retrying",
+            existing.status
+        )));
+    }
+
+    let snapshot = snapshot_path(workspace, &change_id);
+    if snapshot.exists() {
+        if state_fingerprint(&snapshot)? != base_state {
+            return Err(WorkspaceError::Invalid(format!(
+                "recovery point for import {change_id} does not match the workspace"
+            )));
+        }
+    } else {
+        copy_atomic(&workspace.database_path(), &snapshot)?;
+    }
+
+    let change_file = change_path(workspace, &change_id);
+    let mut change = ChangeRecord {
+        format_version: FORMAT_VERSION,
+        sequence: next_sequence(&changes)?,
+        change_id: change_id.clone(),
+        kind: ChangeKind::Apply,
+        plan_id: None,
+        target_change_id: None,
+        base_generation,
+        base_state: base_state.clone(),
+        expected_state: None,
+        snapshot_id: change_id.clone(),
+        sql: None,
+        status: ChangeStatus::Prepared,
+        committed_generation: None,
+        after_state: None,
+        error: None,
+    };
+    write_new_json(&change_file, &change)?;
+
+    let imported = match format {
+        DataFormat::Csv => import_csv(&database, Some(table), bytes),
+        DataFormat::Json => import_json(&database, Some(table), bytes),
+        DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes),
+        DataFormat::Sql => unreachable!(),
+    };
+    let summary = match imported {
+        Ok(summary) => summary.unwrap_or_else(|| "import completed".to_string()),
+        Err(error) => {
+            change.status = ChangeStatus::Failed;
+            change.error = Some(error.to_string());
+            write_atomic_json(&change_file, &change)?;
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = database.checkpoint() {
+        change.status = ChangeStatus::Unresolved;
+        change.error = Some(format!("import committed but checkpoint failed: {error}"));
+        write_atomic_json(&change_file, &change)?;
+        return Err(error.into());
+    }
+    let after_state = state_fingerprint(&workspace.database_path())?;
+    let generation = database.generation();
+    if std::env::var_os("BASALT_CRASH_TEST_AFTER_IMPORT_CHECKPOINT").is_some() {
+        std::process::abort();
+    }
+    change.status = ChangeStatus::Committed;
+    change.committed_generation = Some(generation);
+    change.after_state = Some(after_state.clone());
+    write_atomic_json(&change_file, &change)?;
+
+    Ok(ImportReport {
+        change_id,
+        format: format.name().to_string(),
+        table: table.to_string(),
+        bytes: bytes.len(),
+        summary,
+        base_state,
+        after_state,
+        generation,
+    })
+}
+
+fn required_mcp_table(table: Option<&str>) -> Result<&str, WorkspaceError> {
+    let table = table.ok_or_else(|| {
+        WorkspaceError::Usage("workspace_import requires an explicit table name".to_string())
+    })?;
+    validate_name(table, "table name")?;
+    Ok(table)
+}
+
+fn validate_mcp_import(
+    format: DataFormat,
+    table: &str,
+    bytes: &[u8],
+) -> Result<(), WorkspaceError> {
+    let database = Database::in_memory();
+    match format {
+        DataFormat::Csv => import_csv(&database, Some(table), bytes),
+        DataFormat::Json => import_json(&database, Some(table), bytes),
+        DataFormat::JsonLines => import_json_lines(&database, Some(table), bytes),
+        DataFormat::Sql => unreachable!(),
+    }
+    .map(|_| ())
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

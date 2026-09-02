@@ -56,11 +56,22 @@ impl McpProcess {
     }
 
     fn start_with_workspace(workspace: &Path, allow_writes: bool) -> Self {
+        Self::start_with_workspace_env(workspace, allow_writes, None)
+    }
+
+    fn start_with_workspace_env(
+        workspace: &Path,
+        allow_writes: bool,
+        environment: Option<(&str, &str)>,
+    ) -> Self {
         let workspace = workspace.to_str().expect("workspace path should be UTF-8");
         let mut command = Command::new(env!("CARGO_BIN_EXE_basalt"));
         command.args(["mcp", "--workspace", workspace]);
         if allow_writes {
             command.arg("--allow-writes");
+        }
+        if let Some((key, value)) = environment {
+            command.env(key, value);
         }
         Self::spawn(command)
     }
@@ -133,6 +144,11 @@ impl McpProcess {
             status.success(),
             "MCP server exited unsuccessfully: {status}"
         );
+    }
+
+    fn wait_without_response(mut self) -> std::process::ExitStatus {
+        drop(self.input);
+        self.child.wait().expect("MCP server should stop")
     }
 }
 
@@ -344,29 +360,12 @@ fn serves_modern_discovery_requests_with_per_request_metadata() {
 fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
-    let source = temp.path().join("users.csv");
-    fs::write(&source, "id,name\n1,Ada\n").expect("CSV fixture should be written");
 
     let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
         .args(["workspace", "init", path_arg(&workspace)])
         .output()
         .expect("workspace init should run");
     assert!(init.status.success(), "workspace init failed: {init:?}");
-    let import = Command::new(env!("CARGO_BIN_EXE_basalt"))
-        .args([
-            "workspace",
-            "import",
-            "--table",
-            "users",
-            path_arg(&workspace),
-            path_arg(&source),
-        ])
-        .output()
-        .expect("workspace import should run");
-    assert!(
-        import.status.success(),
-        "workspace import failed: {import:?}"
-    );
 
     let mut read_only = McpProcess::start_with_workspace(&workspace, false);
     initialize_legacy(&mut read_only);
@@ -389,6 +388,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
             "workspace_diff",
             "workspace_export",
             "workspace_history",
+            "workspace_import",
             "workspace_inspect",
             "workspace_preview",
             "workspace_undo"
@@ -397,6 +397,62 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert!(!tool_names.contains(&"execute"));
 
     let inspect = read_only.request(
+        3,
+        "tools/call",
+        json!({"name": "workspace_inspect", "arguments": {}}),
+    );
+    assert!(
+        result(&inspect)["structuredContent"]["tables"]
+            .as_array()
+            .expect("workspace tables should be an array")
+            .is_empty()
+    );
+
+    let denied_import = read_only.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    assert_eq!(result(&denied_import)["isError"], true);
+    assert!(
+        result(&denied_import)["content"][0]["text"]
+            .as_str()
+            .expect("denial should include text")
+            .contains("writes are disabled")
+    );
+    read_only.close();
+
+    let mut writable = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut writable);
+    let imported = writable.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }),
+    );
+    let import_change_id = result(&imported)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("import should return a change ID")
+        .to_owned();
+    assert_eq!(
+        result(&imported)["structuredContent"]["summary"],
+        "table users (1 rows, 2 columns)"
+    );
+
+    let inspect = writable.request(
         3,
         "tools/call",
         json!({"name": "workspace_inspect", "arguments": {}}),
@@ -410,7 +466,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         1
     );
 
-    let query = read_only.request(
+    let query = writable.request(
         4,
         "tools/call",
         json!({
@@ -423,7 +479,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         json!({"type": "text", "value": "Ada"})
     );
 
-    let preview = read_only.request(
+    let preview = writable.request(
         5,
         "tools/call",
         json!({
@@ -440,40 +496,8 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         1
     );
 
-    let denied = read_only.request(
-        6,
-        "tools/call",
-        json!({
-            "name": "workspace_apply",
-            "arguments": {"plan_id": plan_id}
-        }),
-    );
-    assert_eq!(result(&denied)["isError"], true);
-    assert!(
-        result(&denied)["content"][0]["text"]
-            .as_str()
-            .expect("denial should include text")
-            .contains("writes are disabled")
-    );
-
-    let exported = read_only.request(
-        7,
-        "tools/call",
-        json!({
-            "name": "workspace_export",
-            "arguments": {"table": "users", "format": "csv"}
-        }),
-    );
-    assert_eq!(
-        result(&exported)["structuredContent"]["content"],
-        "id,name\n1,Ada\n"
-    );
-    read_only.close();
-
-    let mut writable = McpProcess::start_with_workspace(&workspace, true);
-    initialize_legacy(&mut writable);
     let apply = writable.request(
-        2,
+        6,
         "tools/call",
         json!({
             "name": "workspace_apply",
@@ -486,7 +510,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         .to_owned();
 
     let changed = writable.request(
-        3,
+        7,
         "tools/call",
         json!({
             "name": "query",
@@ -499,21 +523,29 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
 
     let history = writable.request(
-        4,
+        8,
         "tools/call",
         json!({"name": "workspace_history", "arguments": {}}),
     );
     assert_eq!(
         result(&history)["structuredContent"][0]["change_id"],
-        change_id
+        import_change_id
     );
     assert_eq!(
         result(&history)["structuredContent"][0]["status"],
         "committed"
     );
+    assert_eq!(
+        result(&history)["structuredContent"][1]["change_id"],
+        change_id
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][1]["status"],
+        "committed"
+    );
 
     let diff = writable.request(
-        5,
+        9,
         "tools/call",
         json!({
             "name": "workspace_diff",
@@ -527,7 +559,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     assert_eq!(result(&diff)["structuredContent"]["state_changed"], true);
 
     let undo = writable.request(
-        6,
+        10,
         "tools/call",
         json!({
             "name": "workspace_undo",
@@ -540,7 +572,7 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
     );
 
     let restored = writable.request(
-        7,
+        11,
         "tools/call",
         json!({
             "name": "query",
@@ -551,7 +583,172 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
         result(&restored)["structuredContent"]["results"][0]["rows"][0][0],
         json!({"type": "text", "value": "Ada"})
     );
+
+    let exported = writable.request(
+        12,
+        "tools/call",
+        json!({
+            "name": "workspace_export",
+            "arguments": {"table": "users", "format": "csv"}
+        }),
+    );
+    assert_eq!(
+        result(&exported)["structuredContent"]["content"],
+        "id,name\n1,Ada\n"
+    );
     writable.close();
+}
+
+#[test]
+fn workspace_mcp_import_is_reversible_and_rejects_sql_dumps() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let mut server = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut server);
+
+    let sql = server.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "unsafe",
+                "format": "sql",
+                "content": "CREATE TABLE unsafe (id INTEGER);"
+            }
+        }),
+    );
+    assert_eq!(result(&sql)["isError"], true);
+    assert!(
+        result(&sql)["content"][0]["text"]
+            .as_str()
+            .expect("SQL import rejection should include text")
+            .contains("CLI")
+    );
+
+    let imported = server.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "jsonl",
+                "content": "{\"id\":1,\"name\":\"Ada\"}\n"
+            }
+        }),
+    );
+    let change_id = result(&imported)["structuredContent"]["change_id"]
+        .as_str()
+        .expect("import should return a change ID")
+        .to_owned();
+
+    let undone = server.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "workspace_undo",
+            "arguments": {"change_id": change_id}
+        }),
+    );
+    assert_eq!(
+        result(&undone)["structuredContent"]["undone_change_id"],
+        change_id
+    );
+
+    let tables = server.request(
+        5,
+        "tools/call",
+        json!({"name": "list_tables", "arguments": {}}),
+    );
+    assert!(
+        result(&tables)["structuredContent"]["tables"]
+            .as_array()
+            .expect("tables should be an array")
+            .is_empty()
+    );
+    server.close();
+}
+
+#[test]
+fn workspace_mcp_import_reconciles_an_interrupted_commit() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let mut crashing = McpProcess::start_with_workspace_env(
+        &workspace,
+        true,
+        Some(("BASALT_CRASH_TEST_AFTER_IMPORT_CHECKPOINT", "1")),
+    );
+    initialize_legacy(&mut crashing);
+    crashing.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "workspace_import",
+            "arguments": {
+                "table": "users",
+                "format": "csv",
+                "content": "id,name\n1,Ada\n"
+            }
+        }
+    }));
+    assert!(!crashing.wait_without_response().success());
+
+    let mut recovered = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut recovered);
+    let history = recovered.request(
+        2,
+        "tools/call",
+        json!({"name": "workspace_history", "arguments": {}}),
+    );
+    assert_eq!(
+        result(&history)["structuredContent"][0]["status"],
+        "recovered"
+    );
+    let change_id = result(&history)["structuredContent"][0]["change_id"]
+        .as_str()
+        .expect("recovered import should have a change ID")
+        .to_owned();
+
+    let query = recovered.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {"sql": "SELECT name FROM users"}
+        }),
+    );
+    assert_eq!(
+        result(&query)["structuredContent"]["results"][0]["rows"][0][0],
+        json!({"type": "text", "value": "Ada"})
+    );
+
+    let undo = recovered.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "workspace_undo",
+            "arguments": {"change_id": change_id}
+        }),
+    );
+    assert_eq!(
+        result(&undo)["structuredContent"]["undone_change_id"],
+        change_id
+    );
+    recovered.close();
 }
 
 #[test]

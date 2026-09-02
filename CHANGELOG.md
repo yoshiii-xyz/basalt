@@ -13,6 +13,9 @@
 - Added workspace-aware MCP tools for inspect, preview, apply, history, diff,
   undo, and bounded export. MCP is read-only by default; direct SQL writes,
   workspace applies/undos, and checkpointing require explicit `--allow-writes`.
+- Added bounded CSV, JSON, and JSON Lines workspace MCP imports. Each approved
+  import is atomic, path-free, and recorded with a recovery point and change ID;
+  SQL dump imports remain CLI-only.
 - Scoped MCP tool discovery by mode so direct database clients do not receive
   workspace-only tools and workspace clients cannot bypass the plan lifecycle
   with unrestricted SQL execution.
