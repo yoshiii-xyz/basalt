@@ -498,9 +498,11 @@ fn read_interactive_line<R: BufRead>(
     remaining: usize,
 ) -> io::Result<usize> {
     let mut total = 0;
+    let mut bytes = Vec::new();
     loop {
         let available = input.fill_buf()?;
         if available.is_empty() {
+            append_interactive_line(line, bytes)?;
             return Ok(total);
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
@@ -511,20 +513,25 @@ fn read_interactive_line<R: BufRead>(
                 format!("interactive SQL input exceeds the {MAX_SQL_INPUT_BYTES}-byte limit"),
             ));
         }
-        let chunk = &available[..chunk_len];
-        let chunk_text = std::str::from_utf8(chunk).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "interactive input is not valid UTF-8",
-            )
-        })?;
-        line.push_str(chunk_text);
+        bytes.extend_from_slice(&available[..chunk_len]);
         input.consume(chunk_len);
         total += chunk_len;
         if newline.is_some() {
+            append_interactive_line(line, bytes)?;
             return Ok(total);
         }
     }
+}
+
+fn append_interactive_line(line: &mut String, bytes: Vec<u8>) -> io::Result<()> {
+    let text = String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "interactive input is not valid UTF-8",
+        )
+    })?;
+    line.push_str(&text);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1089,7 +1096,7 @@ fn sql_has_open_construct(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
@@ -1191,5 +1198,13 @@ mod tests {
         let error = read_interactive_line(&mut input, &mut line, 0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("interactive SQL input exceeds"));
+    }
+
+    #[test]
+    fn interactive_line_reader_accepts_utf8_split_across_input_chunks() {
+        let mut input = BufReader::with_capacity(1, Cursor::new("SELECT 'é';\n"));
+        let mut line = String::new();
+        read_interactive_line(&mut input, &mut line, MAX_SQL_INPUT_BYTES).unwrap();
+        assert_eq!(line, "SELECT 'é';\n");
     }
 }
