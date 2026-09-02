@@ -42,6 +42,7 @@ grep -Fq '{"type":"select","columns":["id","name"],"rows":[[1,"Ada"],[2,"Grace"]
 
 preview_output=$("$basalt_binary" workspace preview --json "$workspace" \
     "UPDATE users SET name = 'Updated' WHERE id = 1")
+grep -Fq '"sql": "UPDATE users SET name = '\''Updated'\'' WHERE id = 1"' <<<"$preview_output"
 plan_id=$(sed -n 's/[[:space:]]*"plan_id": "\([^"]*\)".*/\1/p' <<<"$preview_output")
 [[ -n "$plan_id" ]]
 

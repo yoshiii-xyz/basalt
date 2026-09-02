@@ -149,6 +149,8 @@ def main() -> None:
             {"sql": "UPDATE mcp_users SET name = 'Grace' WHERE id = 1"},
             MODERN_METADATA,
         )
+        if preview["sql"] != "UPDATE mcp_users SET name = 'Grace' WHERE id = 1":
+            raise RuntimeError(f"preview did not return exact SQL: {preview}")
         plan_id = preview["plan_id"]
 
         applied = call(
