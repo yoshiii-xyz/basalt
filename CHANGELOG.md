@@ -4,6 +4,9 @@
 
 - Made durable snapshot replacement work on Windows as well as Unix, and
   added a regression test for rewriting an existing snapshot.
+- Made workspace inspection use stored live-row counts without scanning table
+  data, and reject a workspace whose canonical database is missing instead of
+  silently creating an empty replacement.
 - Enforced the MCP execution budget inside the SQL engine so `max_rows` is not
   the only protection against large scans, joins, aggregates, or mutations;
   over-budget operations fail before their state or response is published.

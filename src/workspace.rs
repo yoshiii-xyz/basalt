@@ -3379,23 +3379,7 @@ fn inspect(workspace: &Workspace, database: &Database) -> Result<InspectReport, 
 }
 
 fn table_row_count(database: &Database, table: &str) -> Result<usize, WorkspaceError> {
-    let sql = format!("SELECT COUNT(*) FROM {}", quote_identifier(table));
-    let results = database.execute_sql(&sql)?;
-    let Some(StatementResult::Select { rows, .. }) = results.into_iter().next() else {
-        return Err(WorkspaceError::Invalid(
-            "row count did not return a result".to_string(),
-        ));
-    };
-    let Some(row) = rows.first() else {
-        return Ok(0);
-    };
-    match row.first() {
-        Some(Value::Integer(value)) if *value >= 0 => Ok(*value as usize),
-        Some(value) => Err(WorkspaceError::Invalid(format!(
-            "row count returned unexpected value {value}"
-        ))),
-        None => Ok(0),
-    }
+    Ok(database.row_count(table)?)
 }
 
 fn render_inspect(report: &InspectReport, output: &mut dyn Write) -> Result<(), WorkspaceError> {
@@ -3655,6 +3639,12 @@ fn validate_database_paths(root: &Path) -> Result<(), WorkspaceError> {
             "workspace database cannot be a symbolic link".to_string(),
         ));
     }
+    if database.exists() && !database.is_file() {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace database is not a file: {}",
+            database.display()
+        )));
+    }
     for suffix in [".wal", ".lock", ".tmp"] {
         let mut value = database.as_os_str().to_os_string();
         value.push(suffix);
@@ -3665,6 +3655,20 @@ fn validate_database_paths(root: &Path) -> Result<(), WorkspaceError> {
                 path.display()
             )));
         }
+        if path.exists() && !path.is_file() {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace database sidecar is not a file: {}",
+                path.display()
+            )));
+        }
+    }
+    let mut wal_value = database.as_os_str().to_os_string();
+    wal_value.push(".wal");
+    if !database.exists() && !Path::new(&wal_value).exists() {
+        return Err(WorkspaceError::Invalid(format!(
+            "workspace database is missing: {}",
+            database.display()
+        )));
     }
     Ok(())
 }
@@ -3799,6 +3803,26 @@ mod tests {
         let error = Workspace::open_or_init(&root).unwrap_err();
         assert!(error.to_string().contains("not a Basalt workspace"));
         assert_eq!(fs::read(&marker).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_workspace_with_a_missing_database() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-missing-database-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        drop(workspace);
+        fs::remove_file(root.join(DATABASE_FILE)).unwrap();
+
+        let error = Workspace::open(&root).unwrap_err();
+        assert!(error.to_string().contains("workspace database is missing"));
+        assert!(!root.join(DATABASE_FILE).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

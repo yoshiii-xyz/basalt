@@ -34,6 +34,12 @@ do not remove or replace them while a workspace or database is open. Stop the
 owner before copying or deleting a workspace. A durable workspace is owned by
 one process at a time, just like a direct durable database path.
 
+Opening a workspace requires its canonical `data.basalt` snapshot. The only
+exception is an interrupted recovery where `data.basalt.wal` is still present;
+Basalt can rebuild the snapshot from that WAL. If both are missing, Basalt
+fails instead of silently creating an empty database that could hide data
+loss.
+
 ## Import
 
 ```bash
