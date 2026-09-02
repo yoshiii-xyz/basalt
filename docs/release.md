@@ -142,6 +142,7 @@ artifact and rerun validation whenever its version changes.
 
 The release contract covers Basalt's documented SQL dialect, one-process
 embedded database handles, the CLI, and the local stdio MCP server. Durable
-database paths are exclusively owned by one process; use cloned handles for
-threads in that process. It does not claim compatibility with a full external
-SQL implementation or provide a network service/authentication layer.
+database paths and workspaces are exclusively owned by one process; use cloned
+handles for threads in that process. It does not claim compatibility with a
+full external SQL implementation or provide a network service/authentication
+layer.

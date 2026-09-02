@@ -699,6 +699,51 @@ fn workspace_mcp_requires_approval_and_completes_reversible_journey() {
 }
 
 #[test]
+fn workspace_mcp_owns_workspace_until_shutdown() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let mut server = McpProcess::start_with_workspace(&workspace, false);
+    initialize_legacy(&mut server);
+
+    let blocked = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "inspect", path_arg(&workspace)])
+        .output()
+        .expect("workspace inspect should run");
+    assert!(!blocked.status.success());
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("workspace is already open"),
+        "unexpected concurrent workspace error: {blocked:?}"
+    );
+
+    let direct_database = workspace.join("data.basalt");
+    let direct_blocked = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["--quiet", "-c", "SELECT 1", path_arg(&direct_database)])
+        .output()
+        .expect("direct database query should run");
+    assert!(!direct_blocked.status.success());
+    assert!(
+        String::from_utf8_lossy(&direct_blocked.stderr).contains("workspace is already open"),
+        "unexpected direct database error: {direct_blocked:?}"
+    );
+
+    server.close();
+    let available = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "inspect", path_arg(&workspace)])
+        .output()
+        .expect("workspace inspect should run after MCP shutdown");
+    assert!(
+        available.status.success(),
+        "workspace should reopen after MCP shutdown: {available:?}"
+    );
+}
+
+#[test]
 fn workspace_mcp_import_is_reversible_and_rejects_sql_dumps() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");

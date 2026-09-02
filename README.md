@@ -108,8 +108,10 @@ operation report; raw exports to `-` remain clean data streams. Workspace MCP
 imports create recoverable workspace changes; CLI imports remain the direct
 local ingestion path. Later writes can be previewed, applied by exact plan ID,
 inspected in history, diffed at table level, and undone when they are the latest
-change. See [docs/workspaces.md](docs/workspaces.md) for the format and
-boundaries.
+change. A workspace is owned by one Basalt process while open, so stop a
+workspace MCP server before using that workspace from the CLI or by opening its
+`data.basalt` file directly. See [docs/workspaces.md](docs/workspaces.md) for
+the format and boundaries.
 
 The reason to use Basalt for agent-owned data is the write boundary: inspect a
 proposed change before it is durable, apply only the exact reviewed plan, then

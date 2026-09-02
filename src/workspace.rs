@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use csv::{ReaderBuilder, StringRecord, Writer};
@@ -26,6 +27,7 @@ use crate::types::{ColumnType, Value};
 
 const MANIFEST_FILE: &str = "workspace.json";
 const DATABASE_FILE: &str = "data.basalt";
+const WORKSPACE_LOCK_FILE: &str = ".workspace.lock";
 const FORMAT_VERSION: u32 = 1;
 const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_MCP_IMPORT_BYTES: usize = 16 * 1024 * 1024;
@@ -123,6 +125,7 @@ pub struct WorkspaceManifest {
 pub struct Workspace {
     root: PathBuf,
     manifest: WorkspaceManifest,
+    _lock: Arc<File>,
 }
 
 impl Workspace {
@@ -145,6 +148,7 @@ impl Workspace {
             )));
         }
         fs::create_dir_all(&root)?;
+        let lock = acquire_workspace_lock(&root)?;
         let manifest_path = root.join(MANIFEST_FILE);
         let database_path = root.join(DATABASE_FILE);
         if path_is_symlink(&manifest_path)? || manifest_path.exists() {
@@ -166,11 +170,15 @@ impl Workspace {
         };
         write_new_file(&manifest_path, &manifest_bytes(&manifest)?)?;
 
-        let database = Database::open(&database_path)?;
+        let database = Database::open_in_workspace(&database_path)?;
         database.checkpoint()?;
         drop(database);
 
-        Ok(Workspace { root, manifest })
+        Ok(Workspace {
+            root,
+            manifest,
+            _lock: lock,
+        })
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Workspace, WorkspaceError> {
@@ -221,7 +229,12 @@ impl Workspace {
             )));
         }
         validate_database_paths(&root)?;
-        Ok(Workspace { root, manifest })
+        let lock = acquire_workspace_lock(&root)?;
+        Ok(Workspace {
+            root,
+            manifest,
+            _lock: lock,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -239,7 +252,7 @@ impl Workspace {
     pub fn database(&self) -> Result<Database, WorkspaceError> {
         let path = self.database_path();
         validate_database_paths(&self.root)?;
-        Ok(Database::open(path)?)
+        Ok(Database::open_in_workspace(path)?)
     }
 }
 
@@ -2238,7 +2251,7 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
         write_atomic_json(&undo_file, &undo_record)?;
         return Err(error);
     }
-    let restored = match Database::open(&database_path) {
+    let restored = match Database::open_in_workspace(&database_path) {
         Ok(database) => database,
         Err(error) => {
             undo_record.status = ChangeStatus::Unresolved;
@@ -3341,6 +3354,29 @@ fn path_is_symlink(path: &Path) -> Result<bool, WorkspaceError> {
     }
 }
 
+fn acquire_workspace_lock(root: &Path) -> Result<Arc<File>, WorkspaceError> {
+    let path = root.join(WORKSPACE_LOCK_FILE);
+    if path_is_symlink(&path)? {
+        return Err(WorkspaceError::Invalid(
+            "workspace lock cannot be a symbolic link".to_string(),
+        ));
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    match fs4::FileExt::try_lock(&file) {
+        Ok(()) => Ok(Arc::new(file)),
+        Err(fs4::TryLockError::WouldBlock) => Err(WorkspaceError::Invalid(format!(
+            "workspace is already open: {}",
+            root.display()
+        ))),
+        Err(fs4::TryLockError::Error(error)) => Err(WorkspaceError::Io(error)),
+    }
+}
+
 fn validate_database_paths(root: &Path) -> Result<(), WorkspaceError> {
     let database = root.join(DATABASE_FILE);
     if path_is_symlink(&database)? {
@@ -3515,6 +3551,7 @@ mod tests {
         let error = mcp_preview(&workspace, "CREATE TABLE users (id INTEGER)", 1).unwrap_err();
         assert!(error.to_string().contains("response limit is 1 bytes"));
         assert!(!root.join(HISTORY_DIR).exists());
+        drop(workspace);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3587,6 +3624,7 @@ mod tests {
             StatementResult::Select { rows, .. } if rows.len() == 1
         ));
         drop(database);
+        drop(workspace);
         fs::remove_dir_all(root).unwrap();
     }
 }

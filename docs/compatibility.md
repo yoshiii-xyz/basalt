@@ -19,9 +19,11 @@ use those formats when moving data between tools or preserving a readable
 backup.
 
 Within one workspace format version, exports are deterministic and imports are
-atomic. A future incompatible workspace layout must increment the format
-version. A format increment is a migration decision, not an implicit promise
-that old files can be upgraded in place.
+atomic. A workspace is exclusively owned by one Basalt process while open;
+`.workspace.lock` coordinates workspace mode with direct opens of its canonical
+`data.basalt` file. A future incompatible workspace layout must increment the
+format version. A format increment is a migration decision, not an implicit
+promise that old files can be upgraded in place.
 
 ## SQL compatibility checks
 

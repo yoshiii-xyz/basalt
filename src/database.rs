@@ -20,6 +20,7 @@ struct Inner {
     path: Option<PathBuf>,
     wal_path: Option<PathBuf>,
     _lock_file: Option<File>,
+    _workspace_lock_file: Option<File>,
     state: RwLock<State>,
     generation: AtomicU64,
     commit_lock: Mutex<()>,
@@ -39,6 +40,7 @@ impl Database {
                 path: None,
                 wal_path: None,
                 _lock_file: None,
+                _workspace_lock_file: None,
                 state: RwLock::new(State::empty()),
                 generation: AtomicU64::new(0),
                 commit_lock: Mutex::new(()),
@@ -48,7 +50,25 @@ impl Database {
 
     /// Open or create a durable database at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DbError> {
+        Self::open_internal(path, false)
+    }
+
+    /// Open a workspace database when the caller already owns its workspace
+    /// lock. The returned handle still owns the database lock as usual.
+    pub(crate) fn open_in_workspace(path: impl AsRef<Path>) -> Result<Database, DbError> {
+        Self::open_internal(path, true)
+    }
+
+    fn open_internal(
+        path: impl AsRef<Path>,
+        workspace_lock_already_held: bool,
+    ) -> Result<Database, DbError> {
         let path = path.as_ref().to_path_buf();
+        let workspace_lock_file = if workspace_lock_already_held {
+            None
+        } else {
+            acquire_workspace_lock(&path)?
+        };
         let lock_file = acquire_lock(&path)?;
         let wal_path = wal_path(&path);
         let frame = wal::latest(&wal_path)?;
@@ -90,6 +110,7 @@ impl Database {
                 path: Some(path),
                 wal_path: Some(wal_path),
                 _lock_file: Some(lock_file),
+                _workspace_lock_file: workspace_lock_file,
                 state: RwLock::new(state),
                 generation: AtomicU64::new(generation),
                 commit_lock: Mutex::new(()),
@@ -440,6 +461,60 @@ fn acquire_lock(path: &Path) -> Result<File, DbError> {
         Err(fs4::TryLockError::Error(error)) => Err(dberr(
             DbErrorKind::Io(format!("lock database: {error}")),
             format!("lock database: {error}"),
+        )),
+    }
+}
+
+fn acquire_workspace_lock(path: &Path) -> Result<Option<File>, DbError> {
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("data.basalt"))
+    {
+        return Ok(None);
+    }
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(None);
+    };
+    let lock_path = parent.join(".workspace.lock");
+    let metadata = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(dberr(
+                DbErrorKind::Io(format!("inspect workspace lock: {error}")),
+                format!("inspect workspace lock: {error}"),
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(dberr(
+            DbErrorKind::Io("workspace lock cannot be a symbolic link".into()),
+            "workspace lock cannot be a symbolic link",
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            dberr(
+                DbErrorKind::Io(format!("open workspace lock: {error}")),
+                format!("open workspace lock: {error}"),
+            )
+        })?;
+    match fs4::FileExt::try_lock(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(fs4::TryLockError::WouldBlock) => Err(dberr(
+            DbErrorKind::Busy,
+            format!("workspace is already open: {}", parent.display()),
+        )),
+        Err(fs4::TryLockError::Error(error)) => Err(dberr(
+            DbErrorKind::Io(format!("lock workspace: {error}")),
+            format!("lock workspace: {error}"),
         )),
     }
 }

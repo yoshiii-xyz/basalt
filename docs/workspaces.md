@@ -21,6 +21,7 @@ contains:
 ```text
 .basalt-workspace/
 ├── workspace.json       # format_version and canonical database name
+├── .workspace.lock      # workspace ownership lock
 ├── data.basalt          # Basalt snapshot
 ├── data.basalt.wal      # committed frames awaiting checkpointing
 └── data.basalt.lock     # process-ownership lock

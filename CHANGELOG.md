@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep a workspace lock for the full lifetime of CLI and MCP ownership, closing
+  the undo window where another process could write while a recovery snapshot is
+  being installed.
 - Bounded MCP and workspace preview requests to 32 mutating statements per
   call, in addition to their existing SQL and statement limits.
 - Bounded workspace MCP exports by row count and content size before building a

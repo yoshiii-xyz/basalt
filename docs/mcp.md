@@ -304,7 +304,12 @@ into the snapshot and remove old WAL frames. `checkpoint` is a no-op for
 operation in the protocol contract. A durable path is exclusively owned by one
 process; a second CLI or MCP process receives an "already open" error instead
 of competing for the same WAL. Workspace lifecycle operations likewise open
-the underlying database one at a time.
+the underlying database one at a time. A workspace is exclusively owned by the
+Basalt process that opened it, including an MCP server, until that process
+exits. Stop the MCP server before using the workspace from the CLI or another
+MCP server. This ownership lasts across the short database close/reopen window
+used by undo, so another process cannot write data that an undo operation could
+later replace.
 
 ## Troubleshooting
 

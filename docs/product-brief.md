@@ -160,7 +160,9 @@ The current product still has blocking gaps:
   SQLite-file interoperability.
 - The documented SQL dialect does not include prepared parameters, migrations,
   foreign keys, schema alteration, views, CTEs, or subqueries.
-- Durable database paths are intentionally exclusive to one process.
+- Durable database paths and workspaces are intentionally exclusive to one
+  process. A workspace lock remains held for the lifetime of its CLI/MCP owner,
+  including undo's database replacement window.
 - MCP `execute` is powerful and can mutate data; annotations alone are not a
   deterministic safety boundary.
 - The benchmark is an internal workload, not a comparable result against an
