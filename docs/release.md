@@ -21,6 +21,12 @@ python3 scripts/benchmark_workspace.py --basalt target/release/basalt \
   --rows 10000 --repeats 3 > benchmark.json
 ```
 
+On Unix, `bash scripts/release-check.sh` runs the quality gates above, checks
+the packaged crate, installs that exact package into a temporary prefix, and
+runs the installed-binary CLI/MCP smoke journey. It also runs `cargo audit`
+and `dist plan` when those tools are installed. The full 10,000-row benchmark
+remains a separate measurement because its output is machine-dependent.
+
 The test command includes the throughput benchmark target. Run the in-process
 benchmark directly when a storage, planner, or execution change could affect
 its result:

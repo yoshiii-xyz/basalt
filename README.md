@@ -209,6 +209,7 @@ calls.
 | scripts/benchmark_workspace.py | Reproducible workflow comparison harness |
 | scripts/differential_sql.py | Supported-subset SQLite differential checks |
 | scripts/mcp-smoke.py | Installed-binary writable MCP smoke test |
+| scripts/release-check.sh | Packaged-crate and release preflight |
 | scripts/smoke-test.sh | Installed-binary CLI and read-only MCP smoke test |
 | fuzz/ | Optional libFuzzer parser and snapshot targets |
 
@@ -226,6 +227,16 @@ cargo build --release --locked
 cargo audit
 python3 scripts/benchmark_workspace.py --basalt target/release/basalt
 ```
+
+For the complete Unix release preflight, use:
+
+```bash
+bash scripts/release-check.sh
+```
+
+It installs the exact packaged crate into a temporary prefix and runs the
+installed-binary smoke journey. It also runs `cargo audit` and `dist plan`
+when those tools are available.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
 [CHANGELOG.md](CHANGELOG.md) for project history. The release checklist is in
