@@ -252,6 +252,7 @@ calls.
 | docs/sql.md | Supported SQL dialect and transaction semantics |
 | docs/benchmark-results.md | Recorded workflow benchmark snapshot |
 | docs/compatibility.md | File-format boundary and differential-test policy |
+| docs/production-readiness.md | Technical release contract, limits, and evidence |
 | docs/early-user-validation.md | Five-minute switching test and feedback template |
 | docs/fuzzing.md | Parser and persistence fuzzing instructions |
 | docs/mcp.md | MCP installation, configuration, and tool contract |

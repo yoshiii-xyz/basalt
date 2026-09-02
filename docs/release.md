@@ -57,7 +57,7 @@ do not claim an audit was performed when the tool was unavailable.
 `dist-workspace.toml` is the source of truth for the release target matrix,
 installer types, and immutable action pins. `dist generate` refreshes the
 checked-in GitHub Actions workflow; `dist plan` shows the artifacts without
-publishing anything. A version tag such as `v0.1.0` builds the release
+publishing anything. A version tag such as `vVERSION` builds the release
 archives, shell and PowerShell
 installers, and SHA-256 files. The workflow keeps a reviewed least-privilege
 permission override, so `allow-dirty = ["ci"]` is intentional; review that
@@ -68,6 +68,12 @@ but every archive contains a `basalt` executable. The crate install is
 `cargo install basalt-db --locked`; the `v0.1.1` prebuilt download and installer
 are published and have passed the public checksum and isolated consumer smoke
 checks.
+
+The [production-readiness contract](production-readiness.md) is the authority
+for technical scope, fixed limits, backup/restore, and evidence. The public
+`v0.1.1` artifacts do not automatically include hardening committed after that
+release; publish a new version only after its package, archives, checksums,
+installer, and registry metadata are verified together.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles and tests on macOS and Windows runners. The release workflow's

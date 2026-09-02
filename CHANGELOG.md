@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Preserved monotonic database generations during workspace undo by restoring
+  the verified logical state through a new WAL commit instead of copying an
+  older-generation snapshot over the live database; crash reconciliation now
+  recognizes both new and legacy prepared undo records.
+- Added WAL version 2 header checksums while retaining version 1 read support,
+  and rejected non-monotonic generations during recovery.
+- Validated persisted plan and change metadata against the SQL, identifiers,
+  status receipts, and statement metadata before workspace operations use it.
+- Cleaned failed workspace initialization without deleting pre-existing
+  reserved files, bounded non-record history directory entries, and rejected
+  missing databases whose WAL has no recoverable committed frame.
+- Bounded SQL parser expression and statement nesting to fail safely on deeply
+  nested input instead of exhausting the process stack.
+- Added the production-readiness contract covering scope, non-goals, fixed
+  limits, backup/restore, evidence, and the distinction between automated
+  checks and human validation.
 - Bounded CLI SQL scripts, stdin, command-line actions, and interactive input to
   16 MiB, including line-by-line enforcement so a missing newline cannot grow
   the shell buffer without limit.

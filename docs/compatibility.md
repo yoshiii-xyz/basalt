@@ -7,10 +7,16 @@ engine accepts it.
 
 ## Database and workspace files
 
-`data.basalt` is Basalt's own checksummed snapshot/WAL format. It is not a
-SQLite database and must not be opened by SQLite, DuckDB, or an application
-that assumes SQLite's file format. Basalt does not promise that another engine
-can recover a partial or future Basalt file.
+`data.basalt` and `data.basalt.wal` are Basalt's own checksummed snapshot/WAL
+formats. They are not SQLite databases and must not be opened by SQLite,
+DuckDB, or an application that assumes SQLite's file format. Basalt does not
+promise that another engine can recover a partial or future Basalt file.
+
+Snapshot format `1` is the current format. WAL version `1` remains readable for
+existing workspaces; new frames use WAL version `2`, which adds a checksum for
+the frame header as well as the existing payload checksum. A WAL may contain a
+valid mixture during an upgrade. Basalt rejects unsupported versions, invalid
+headers, invalid payloads, and non-monotonic generations rather than guessing.
 
 Workspace directories carry a `workspace.json` format version. Basalt rejects
 an unsupported version instead of guessing. The current format version is `1`.
@@ -24,6 +30,12 @@ atomic. A workspace is exclusively owned by one Basalt process while open;
 `data.basalt` file. A future incompatible workspace layout must increment the
 format version. A format increment is a migration decision, not an implicit
 promise that old files can be upgraded in place.
+
+If `data.basalt` is missing, workspace mode opens it only when the WAL contains
+a recoverable committed frame. An empty, torn-only, corrupt, or unsupported WAL
+does not authorize creating an empty replacement; the open fails so possible
+data loss is visible. See the [backup and restore procedure](production-readiness.md#backup-and-restore)
+for safe copies of durable workspaces.
 
 ## SQL compatibility checks
 

@@ -536,6 +536,7 @@ fn previews_applies_diffs_and_undoes_one_change() {
     assert!(apply.status.success(), "apply failed: {apply:?}");
     let apply: Value = serde_json::from_slice(&apply.stdout).unwrap();
     let change_id = apply["change_id"].as_str().unwrap();
+    let apply_generation = apply["generation"].as_u64().unwrap();
 
     let retried_apply = run(&[
         "workspace",
@@ -588,6 +589,7 @@ fn previews_applies_diffs_and_undoes_one_change() {
     assert!(undo.status.success(), "undo failed: {undo:?}");
     let undo: Value = serde_json::from_slice(&undo.stdout).unwrap();
     assert_eq!(undo["undone_change_id"], change_id);
+    assert!(undo["generation"].as_u64().unwrap() > apply_generation);
 
     let retried_undo = run(&[
         "workspace",

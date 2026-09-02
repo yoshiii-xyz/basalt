@@ -15,8 +15,10 @@ basalt workspace query --json .basalt-workspace "SELECT * FROM issues"
 ```
 
 `basalt init PATH` is an alias for `basalt workspace init PATH`. Initialization
-refuses to replace an existing manifest or reserved database file. A workspace
-contains:
+refuses to replace an existing manifest, database, or database sidecar. If a
+new initialization fails partway through, Basalt removes only the artifacts it
+created and leaves a pre-existing directory or reserved file untouched. A
+workspace contains:
 
 ```text
 .basalt-workspace/
@@ -35,10 +37,10 @@ owner before copying or deleting a workspace. A durable workspace is owned by
 one process at a time, just like a direct durable database path.
 
 Opening a workspace requires its canonical `data.basalt` snapshot. The only
-exception is an interrupted recovery where `data.basalt.wal` is still present;
-Basalt can rebuild the snapshot from that WAL. If both are missing, Basalt
-fails instead of silently creating an empty database that could hide data
-loss.
+exception is an interrupted recovery where `data.basalt.wal` still contains a
+recoverable committed frame; Basalt can rebuild the snapshot from that WAL. A
+missing snapshot with an empty, torn-only, corrupt, or unsupported WAL fails
+instead of silently creating an empty database that could hide data loss.
 
 ## Import
 
@@ -115,9 +117,11 @@ client loses the preview response or reconnects to the workspace.
 Apply writes a recovery snapshot before executing the transaction. History
 records are finalized after the database checkpoint; an interrupted finalize
 is surfaced as `recovered` or `unresolved` rather than silently discarded.
-Undo restores only the latest committed change and refuses to remove later
-work. Diffs report schema changes and exact added/removed row counts from a
-deterministic row-multiset comparison. They do not claim keyed row pairing or a
+Undo restores only the latest committed change through a new durable WAL
+generation and refuses to remove later work. Generations remain monotonic even
+when the logical contents are restored. Diffs report schema changes and exact
+added/removed row counts from a deterministic row-multiset comparison. They do
+not claim keyed row pairing or a
 row-by-row patch; an update normally appears as one removed row and one added
 row.
 
@@ -183,5 +187,9 @@ must be checkpointed before the WAL limit is reached. Workspace-managed
 database, WAL, snapshot, and lock paths reject symbolic links. If a snapshot
 is damaged, Basalt will use WAL recovery only when the WAL generation is
 provably newer; an older or same-generation WAL is rejected to prevent a
-silent rollback. Stop the owning process before copying, restoring, or
-deleting workspace files.
+silent rollback. Workspace MCP operations also have finite work, response,
+history, import, diff, and export limits; see [the production-readiness
+contract](production-readiness.md#fixed-resource-limits). Stop the owning
+process before copying, restoring, or deleting workspace files. The exact
+backup and restore procedure is documented in [the production-readiness
+contract](production-readiness.md#backup-and-restore).

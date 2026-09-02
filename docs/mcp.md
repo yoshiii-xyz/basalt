@@ -10,7 +10,8 @@ Rust SDK for protocol framing and lifecycle handling. Its behavior follows the
 MCP [stdio transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
 and [tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
 specifications, including modern discovery requests and compatibility with the
-legacy initialize handshake.
+legacy initialize handshake. Each newline-delimited JSON-RPC frame is capped
+at 32 MiB before decoding; tool-specific limits are smaller.
 
 For the current `2026-07-28` protocol, a host can begin with
 `server/discover`; subsequent requests carry the protocol version, client
@@ -272,8 +273,10 @@ Workspace previews accept at most 64 statements and 32 mutating statements per
 call. MCP workspace previews and applies also accept at most 10,000 affected
 rows per plan. This bounds the impact described by one plan; larger jobs should
 be split into separately reviewed plans. SQL executed by `query`, direct-mode
-`execute`, `workspace_preview`, and `workspace_apply` also shares a
-1,000,000-unit engine work budget per request. The budget is enforced while
+`execute`, `workspace_preview`, and `workspace_apply` shares a 1,000,000-unit
+engine work budget per request. Workspace imports, diffs, undos, exports, and
+checkpoint phases use the same bounded execution model where they inspect or
+clone database state. The budget is enforced while
 the engine snapshots state, scans, joins, groups, projects, sorts, prepares,
 or commits rows, before the full result is handed to MCP. A unit is roughly a
 scalar plus one 1 KiB chunk of text payload, with extra units for relational
@@ -300,9 +303,10 @@ require `--allow-writes`. History includes import format, table, byte count,
 and summary for every workspace import; `workspace_plan`
 reloads the exact persisted SQL and preview impact by plan ID.
 
-`workspace_history` rejects a ledger larger than 10,000 change records or 1 MiB
-of change metadata before loading the full response. Use the CLI history command
-for a complete inspection of a larger local ledger.
+`workspace_history` rejects a changes directory larger than 10,000 entries or
+1 MiB of change metadata before loading the full response. Non-record files in
+that directory count toward the entry limit. Use the CLI history command for a
+complete inspection of a larger local ledger.
 
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the
@@ -359,6 +363,9 @@ projection or lower `max_rows` when that happens. SQL input is limited to 1 MiB,
 100 statements, and 32 mutating statements per call. A request that exceeds
 the engine work budget returns an error naming the operation that crossed the
 bound; no partial autocommit mutation is published.
+
+The complete list of safety limits, including parser nesting and durable file
+caps, is maintained in the [production-readiness contract](production-readiness.md#fixed-resource-limits).
 
 The `basalt://schema` resource contains the current committed table and column
 metadata as `application/json`. It is useful when an agent needs schema context

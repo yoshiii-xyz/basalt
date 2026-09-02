@@ -12,6 +12,8 @@ pub struct ParseError {
 pub struct Parser {
     tokens: Vec<TokenSpan>,
     pos: usize,
+    expression_depth: usize,
+    statement_depth: usize,
 }
 
 pub fn parse(input: &str) -> Result<Vec<Statement>, ParseError> {
@@ -19,7 +21,12 @@ pub fn parse(input: &str) -> Result<Vec<Statement>, ParseError> {
         message: e.message,
         offset: e.offset,
     })?;
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        expression_depth: 0,
+        statement_depth: 0,
+    };
     let mut stmts = Vec::new();
     while !p.at_eof() {
         stmts.push(p.parse_statement()?);
@@ -111,6 +118,18 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        if self.statement_depth >= MAX_STATEMENT_DEPTH {
+            return self.err(format!(
+                "SQL statement nesting exceeds the {MAX_STATEMENT_DEPTH}-level limit"
+            ));
+        }
+        self.statement_depth += 1;
+        let result = self.parse_statement_inner();
+        self.statement_depth -= 1;
+        result
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Statement, ParseError> {
         match self.cur().clone() {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("CREATE") => self.parse_create(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("DROP") => self.parse_drop(),
@@ -529,6 +548,18 @@ impl Parser {
     // ---- expressions (precedence climbing) ----
 
     pub fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
+        if self.expression_depth >= MAX_EXPRESSION_DEPTH {
+            return self.err(format!(
+                "SQL expression nesting exceeds the {MAX_EXPRESSION_DEPTH}-level limit"
+            ));
+        }
+        self.expression_depth += 1;
+        let result = self.parse_expr_inner(min_prec);
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn parse_expr_inner(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_unary()?;
         loop {
             let op = match self.cur() {
@@ -694,6 +725,8 @@ impl Parser {
 
 const NOT_PREC: u8 = 3;
 const UNARY_PREC: u8 = 6;
+const MAX_EXPRESSION_DEPTH: usize = 128;
+const MAX_STATEMENT_DEPTH: usize = 64;
 
 fn bin_prec(op: BinOp) -> u8 {
     match op {
@@ -769,6 +802,28 @@ mod tests {
             }
             _ => panic!("wrong statement"),
         }
+    }
+
+    #[test]
+    fn rejects_deep_expression_nesting_without_recursing_forever() {
+        let input = format!(
+            "SELECT {}1{}",
+            "(".repeat(MAX_EXPRESSION_DEPTH + 1),
+            ")".repeat(MAX_EXPRESSION_DEPTH + 1)
+        );
+
+        let error = parse(&input).unwrap_err();
+
+        assert!(error.message.contains("expression nesting"));
+    }
+
+    #[test]
+    fn rejects_deep_statement_nesting_without_recursing_forever() {
+        let input = format!("{}SELECT 1", "EXPLAIN ".repeat(MAX_STATEMENT_DEPTH + 1));
+
+        let error = parse(&input).unwrap_err();
+
+        assert!(error.message.contains("statement nesting"));
     }
 
     #[test]

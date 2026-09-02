@@ -1,8 +1,9 @@
-# Benchmark snapshot
+# Historical benchmark snapshot
 
-This is a reproducible evidence snapshot for the selected workspace workflow,
-not a general-purpose database performance claim. It was run on 2026-09-02
-against commit `dfe7534` with 10,000 fixture rows and three fresh repetitions:
+This is a historical, reproducible evidence snapshot for the selected workspace
+workflow, not a current-release result or a general-purpose database
+performance claim. It was run on 2026-09-02 against commit `dfe7534` with
+10,000 fixture rows and three fresh repetitions:
 
 ```bash
 python3 scripts/benchmark_workspace.py \

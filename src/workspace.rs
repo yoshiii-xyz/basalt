@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use csv::{ReaderBuilder, StringRecord, Writer};
@@ -52,6 +53,8 @@ const HISTORY_DIR: &str = "history";
 const PLANS_DIR: &str = "plans";
 const CHANGES_DIR: &str = "changes";
 const SNAPSHOTS_DIR: &str = "snapshots";
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub const HELP: &str = "Basalt workspace — local, portable SQL workspaces\n\n\
 Usage:\n  basalt workspace <COMMAND> [OPTIONS]\n\n\
@@ -142,6 +145,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn init(path: impl AsRef<Path>) -> Result<Workspace, WorkspaceError> {
         let root = path.as_ref().to_path_buf();
+        let root_preexisting = root.exists();
         if root.as_os_str().is_empty() {
             return Err(WorkspaceError::Invalid(
                 "workspace path cannot be empty".to_string(),
@@ -159,31 +163,62 @@ impl Workspace {
             )));
         }
         fs::create_dir_all(&root)?;
+        let workspace_lock_path = root.join(WORKSPACE_LOCK_FILE);
+        let lock_preexisting = match fs::symlink_metadata(&workspace_lock_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        };
         let lock = acquire_workspace_lock(&root)?;
         let manifest_path = root.join(MANIFEST_FILE);
         let database_path = root.join(DATABASE_FILE);
-        if path_is_symlink(&manifest_path)? || manifest_path.exists() {
-            return Err(WorkspaceError::Invalid(format!(
-                "workspace already exists: {}",
-                root.display()
-            )));
-        }
-        if path_is_symlink(&database_path)? || database_path.exists() {
-            return Err(WorkspaceError::Invalid(format!(
-                "reserved database path already exists: {}",
-                database_path.display()
-            )));
-        }
-
         let manifest = WorkspaceManifest {
             format_version: FORMAT_VERSION,
             database: DATABASE_FILE.to_string(),
         };
-        write_new_file(&manifest_path, &manifest_bytes(&manifest)?)?;
-
-        let database = Database::open_in_workspace(&database_path)?;
-        database.checkpoint()?;
-        drop(database);
+        let mut manifest_created = false;
+        let initialization = (|| {
+            if path_is_symlink(&manifest_path)? || manifest_path.exists() {
+                return Err(WorkspaceError::Invalid(format!(
+                    "workspace already exists: {}",
+                    root.display()
+                )));
+            }
+            if path_is_symlink(&database_path)? || database_path.exists() {
+                return Err(WorkspaceError::Invalid(format!(
+                    "reserved database path already exists: {}",
+                    database_path.display()
+                )));
+            }
+            for suffix in [".wal", ".lock", ".tmp"] {
+                let path = sidecar_path(&database_path, suffix);
+                if path_is_symlink(&path)? || path.exists() {
+                    return Err(WorkspaceError::Invalid(format!(
+                        "reserved database sidecar already exists: {}",
+                        path.display()
+                    )));
+                }
+            }
+            write_new_file(&manifest_path, &manifest_bytes(&manifest)?)?;
+            manifest_created = true;
+            let database = Database::open_in_workspace(&database_path)?;
+            database.checkpoint()?;
+            Ok::<(), WorkspaceError>(())
+        })();
+        if let Err(error) = initialization {
+            drop(lock);
+            if let Err(cleanup_error) = cleanup_failed_init(
+                &root,
+                manifest_created,
+                !lock_preexisting,
+                !root_preexisting,
+            ) {
+                return Err(WorkspaceError::Invalid(format!(
+                    "workspace initialization failed: {error}; cleanup also failed: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
 
         Ok(Workspace {
             root,
@@ -241,8 +276,11 @@ impl Workspace {
                 manifest.database
             )));
         }
-        validate_database_paths(&root)?;
         let lock = acquire_workspace_lock(&root)?;
+        if let Err(error) = validate_database_paths(&root) {
+            drop(lock);
+            return Err(error);
+        }
         Ok(Workspace {
             root,
             manifest,
@@ -515,7 +553,7 @@ pub fn run<R: Read, W: Write>(
             json,
         } => {
             let workspace = Workspace::open(workspace)?;
-            let report = undo(&workspace, &change_id)?;
+            let report = undo(&workspace, &change_id, None)?;
             if json {
                 serde_json::to_writer_pretty(&mut *output, &report)?;
                 output.write_all(b"\n")?;
@@ -1725,7 +1763,8 @@ fn ensure_history_dirs(workspace: &Workspace) -> Result<(), WorkspaceError> {
     let directories = history_directories(workspace);
     validate_history_dirs(workspace)?;
     for directory in directories {
-        fs::create_dir_all(directory)?;
+        fs::create_dir_all(&directory)?;
+        sync_parent(&directory)?;
     }
     validate_history_dirs(workspace)?;
     Ok(())
@@ -1832,6 +1871,11 @@ fn state_fingerprint(path: &Path) -> Result<String, WorkspaceError> {
     ))
 }
 
+fn logical_state_fingerprint(path: &Path) -> Result<String, WorkspaceError> {
+    let (state, _) = storage::read_snapshot(path)?;
+    Ok(format!("sha256:{}", sha256_bytes(&state.encode())))
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1932,13 +1976,6 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<(), WorkspaceError> 
     atomic_write_file(destination, &bytes)
 }
 
-fn truncate_wal(database_path: &Path) -> Result<(), WorkspaceError> {
-    let mut path = database_path.as_os_str().to_os_string();
-    path.push(".wal");
-    crate::wal::truncate(&PathBuf::from(path))?;
-    Ok(())
-}
-
 fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, WorkspaceError> {
     valid_id(plan_id)?;
     validate_history_dirs(workspace)?;
@@ -1957,6 +1994,7 @@ fn load_plan(workspace: &Workspace, plan_id: &str) -> Result<PlanRecord, Workspa
             "plan is invalid or has been modified: {plan_id}"
         )));
     }
+    validate_plan_record(&plan, plan_id)?;
     Ok(plan)
 }
 
@@ -1976,7 +2014,20 @@ fn load_changes_with_limits(
     }
     let mut changes = Vec::new();
     let mut metadata_bytes = 0u64;
+    let mut directory_entries = 0usize;
     for entry in fs::read_dir(&directory)? {
+        directory_entries = directory_entries.checked_add(1).ok_or_else(|| {
+            WorkspaceError::Invalid(
+                "workspace history directory entry count overflowed".to_string(),
+            )
+        })?;
+        if let Some(max_entries) = max_entries
+            && directory_entries > max_entries
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "MCP workspace history directory exceeds the {max_entries}-entry limit"
+            )));
+        }
         let path = entry?.path();
         if path_is_symlink(&path)? {
             return Err(WorkspaceError::Invalid(format!(
@@ -1991,13 +2042,6 @@ fn load_changes_with_limits(
             return Err(WorkspaceError::Invalid(format!(
                 "workspace history record is not a file: {}",
                 path.display()
-            )));
-        }
-        if let Some(max_entries) = max_entries
-            && changes.len() >= max_entries
-        {
-            return Err(WorkspaceError::Invalid(format!(
-                "MCP workspace history exceeds the {max_entries}-entry limit"
             )));
         }
         if let Some(max_metadata_bytes) = max_metadata_bytes {
@@ -2025,15 +2069,217 @@ fn load_changes_with_limits(
                 path.display()
             )));
         }
+        validate_change_record(&change, &path)?;
         changes.push(change);
     }
     changes.sort_by_key(|change| change.sequence);
+    if changes
+        .windows(2)
+        .any(|pair| pair[0].sequence == pair[1].sequence)
+    {
+        return Err(WorkspaceError::Invalid(
+            "workspace history contains duplicate change sequence numbers".to_string(),
+        ));
+    }
     Ok(changes)
+}
+
+fn validate_plan_record(plan: &PlanRecord, plan_id: &str) -> Result<(), WorkspaceError> {
+    if !valid_state_fingerprint(&plan.base_state) {
+        return Err(WorkspaceError::Invalid(format!(
+            "plan {plan_id} has an invalid base-state fingerprint"
+        )));
+    }
+    let statements = parse(&plan.sql).map_err(|error| {
+        WorkspaceError::Invalid(format!(
+            "plan {plan_id} contains invalid SQL at byte {}: {}",
+            error.offset, error.message
+        ))
+    })?;
+    if statements.is_empty()
+        || statements.len() > MAX_PREVIEW_STATEMENTS
+        || statements.iter().any(statement_contains_control)
+        || statements
+            .iter()
+            .filter(|statement| is_mutation_statement(statement))
+            .count()
+            > MAX_PREVIEW_MUTATIONS
+        || !statements.iter().any(is_mutation_statement)
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "plan {plan_id} contains an invalid preview statement sequence"
+        )));
+    }
+    if plan.statements.len() != statements.len() {
+        return Err(WorkspaceError::Invalid(format!(
+            "plan {plan_id} statement metadata does not match its SQL"
+        )));
+    }
+    for (index, (statement, item)) in statements.iter().zip(&plan.statements).enumerate() {
+        let (kind, mutating) = statement_metadata(statement);
+        if item.statement != index + 1 || item.kind != kind || item.mutating != mutating {
+            return Err(WorkspaceError::Invalid(format!(
+                "plan {plan_id} statement metadata does not match statement {}",
+                index + 1
+            )));
+        }
+        if item
+            .rows_returned
+            .is_some_and(|rows| rows > MAX_PREVIEW_ROWS)
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "plan {plan_id} contains an oversized preview result"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_change_record(change: &ChangeRecord, path: &Path) -> Result<(), WorkspaceError> {
+    let invalid = |message: &str| {
+        Err(WorkspaceError::Invalid(format!(
+            "invalid workspace change {}: {message}",
+            path.display()
+        )))
+    };
+    if change.sequence == 0 {
+        return invalid("sequence must be greater than zero");
+    }
+    if !valid_id(&change.change_id).is_ok() || change.snapshot_id != change.change_id {
+        return invalid("change and recovery-point identifiers are invalid or do not match");
+    }
+    if !valid_state_fingerprint(&change.base_state)
+        || change
+            .expected_state
+            .as_deref()
+            .is_some_and(|state| !valid_state_fingerprint(state))
+        || change
+            .after_state
+            .as_deref()
+            .is_some_and(|state| !valid_state_fingerprint(state))
+    {
+        return invalid("state fingerprint is invalid");
+    }
+    match change.kind {
+        ChangeKind::Apply => {
+            if let Some(plan_id) = &change.plan_id {
+                if !valid_id(plan_id).is_ok()
+                    || change.import.is_some()
+                    || change.sql.as_deref().is_none_or(str::is_empty)
+                    || change
+                        .sql
+                        .as_deref()
+                        .is_none_or(|sql| plan_id_for(&change.base_state, sql) != *plan_id)
+                    || apply_change_id(plan_id, &change.base_state) != change.change_id
+                {
+                    return invalid("apply plan metadata is inconsistent");
+                }
+            } else {
+                let Some(import) = &change.import else {
+                    return invalid("apply record is missing its plan or import metadata");
+                };
+                if change.sql.is_some()
+                    || !valid_id(&import.request_key).is_ok()
+                    || u64::try_from(import.bytes).unwrap_or(u64::MAX) > MAX_IMPORT_BYTES
+                {
+                    return invalid("import metadata is inconsistent");
+                }
+                let format = match DataFormat::parse(&import.format) {
+                    Ok(format) => format,
+                    Err(_) => return invalid("import format is invalid"),
+                };
+                if format == DataFormat::Sql {
+                    if import.table.is_some() {
+                        return invalid("SQL import must not have a table");
+                    }
+                } else if import
+                    .table
+                    .as_deref()
+                    .is_none_or(|table| validate_name(table, "table name").is_err())
+                {
+                    return invalid("row import table is invalid");
+                }
+            }
+            if change.target_change_id.is_some() || change.expected_state.is_some() {
+                return invalid("apply record contains undo metadata");
+            }
+        }
+        ChangeKind::Undo => {
+            if change.plan_id.is_some()
+                || change.sql.is_some()
+                || change.import.is_some()
+                || change
+                    .target_change_id
+                    .as_deref()
+                    .is_none_or(|id| !valid_id(id).is_ok())
+                || change.expected_state.is_none()
+                || change.target_change_id.as_deref().is_some_and(|target| {
+                    undo_change_id(target, &change.base_state) != change.change_id
+                })
+            {
+                return invalid("undo metadata is inconsistent");
+            }
+        }
+    }
+    match change.status {
+        ChangeStatus::Prepared | ChangeStatus::Failed | ChangeStatus::Unresolved => {
+            if change.committed_generation.is_some() || change.after_state.is_some() {
+                return invalid("uncommitted record contains a committed receipt");
+            }
+        }
+        ChangeStatus::Committed | ChangeStatus::Recovered => {
+            if change.committed_generation.is_none() || change.after_state.is_none() {
+                return invalid("committed record is missing its receipt");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn statement_metadata(statement: &Statement) -> (&'static str, bool) {
+    match statement {
+        Statement::Select { .. } => ("select", false),
+        Statement::Explain(_) => ("explain", false),
+        Statement::CreateTable { .. } => ("create_table", true),
+        Statement::DropTable { .. } => ("drop_table", true),
+        Statement::CreateIndex { .. } => ("create_index", true),
+        Statement::DropIndex { .. } => ("drop_index", true),
+        Statement::Insert { .. } | Statement::InsertSelect { .. } => ("insert", true),
+        Statement::Update { .. } => ("update", true),
+        Statement::Delete { .. } => ("delete", true),
+        Statement::Begin => ("begin", false),
+        Statement::Commit => ("commit", false),
+        Statement::Rollback => ("rollback", false),
+        Statement::Checkpoint => ("checkpoint", false),
+    }
+}
+
+fn valid_state_fingerprint(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn load_changes_for_operation(
+    workspace: &Workspace,
+    bounded: bool,
+) -> Result<Vec<ChangeRecord>, WorkspaceError> {
+    if bounded {
+        load_changes_with_limits(
+            workspace,
+            Some(MAX_MCP_HISTORY_ENTRIES),
+            Some(MAX_MCP_HISTORY_METADATA_BYTES),
+        )
+    } else {
+        load_changes(workspace)
+    }
 }
 
 fn reconcile_change(
     change: &mut ChangeRecord,
     current_state: &str,
+    current_logical_state: Option<&str>,
     current_generation: u64,
 ) -> bool {
     if change.status != ChangeStatus::Prepared {
@@ -2064,7 +2310,9 @@ fn reconcile_change(
             }
         }
         ChangeKind::Undo => {
-            if change.expected_state.as_deref() == Some(current_state) {
+            if change.expected_state.as_deref() == Some(current_state)
+                || change.expected_state.as_deref() == current_logical_state
+            {
                 change.status = ChangeStatus::Recovered;
                 change.committed_generation = Some(current_generation);
                 change.after_state = Some(current_state.to_string());
@@ -2094,8 +2342,18 @@ fn reconcile_changes(
     current_state: &str,
     current_generation: u64,
 ) -> Result<(), WorkspaceError> {
+    let current_logical_state = changes
+        .iter()
+        .any(|change| change.kind == ChangeKind::Undo && change.status == ChangeStatus::Prepared)
+        .then(|| logical_state_fingerprint(&workspace.database_path()))
+        .transpose()?;
     for change in changes {
-        if reconcile_change(change, current_state, current_generation) {
+        if reconcile_change(
+            change,
+            current_state,
+            current_logical_state.as_deref(),
+            current_generation,
+        ) {
             write_atomic_json(&change_path(workspace, &change.change_id), change)?;
         }
     }
@@ -2170,12 +2428,12 @@ fn apply_plan(
     let current_state = state_fingerprint(&workspace.database_path())?;
     let change_id = apply_change_id(&plan.plan_id, &plan.base_state);
     let change_file = change_path(workspace, &change_id);
-    let mut changes = load_changes(workspace)?;
+    let mut changes = load_changes_for_operation(workspace, max_work.is_some())?;
     if let Some(existing) = changes
         .iter_mut()
         .find(|change| change.change_id == change_id)
     {
-        if reconcile_change(existing, &current_state, database.generation()) {
+        if reconcile_change(existing, &current_state, None, database.generation()) {
             write_atomic_json(&change_file, existing)?;
         }
         if existing.status.is_committed() {
@@ -2291,7 +2549,7 @@ fn apply_plan(
         return Err(error.into());
     }
     drop(connection);
-    if let Err(error) = database.checkpoint() {
+    if let Err(error) = database.checkpoint_with_budget(&mut budget) {
         change.status = ChangeStatus::Unresolved;
         change.error = Some(format!(
             "operation committed but checkpoint failed: {error}"
@@ -2321,15 +2579,19 @@ fn diff(
     workspace: &Workspace,
     requested_change_id: Option<&str>,
 ) -> Result<DiffReport, WorkspaceError> {
-    diff_with_row_limit(workspace, requested_change_id, None)
+    diff_with_row_limit(workspace, requested_change_id, None, None)
 }
 
 fn diff_with_row_limit(
     workspace: &Workspace,
     requested_change_id: Option<&str>,
     max_total_rows: Option<usize>,
+    max_work: Option<usize>,
 ) -> Result<DiffReport, WorkspaceError> {
-    let mut changes = load_changes(workspace)?;
+    let mut budget = max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
+    let mut changes = load_changes_for_operation(workspace, max_work.is_some())?;
     let database = workspace.database()?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
@@ -2363,8 +2625,8 @@ fn diff_with_row_limit(
         )));
     }
     let before_database = Database::open(&snapshot)?;
-    let before = logical_snapshot(&before_database, max_total_rows)?;
-    let after = logical_snapshot(&database, max_total_rows)?;
+    let before = logical_snapshot(&before_database, max_total_rows, &mut budget)?;
+    let after = logical_snapshot(&database, max_total_rows, &mut budget)?;
     let mut names = BTreeSet::new();
     names.extend(before.keys().cloned());
     names.extend(after.keys().cloned());
@@ -2459,6 +2721,7 @@ fn row_key(row: &[Value]) -> Vec<u8> {
 fn logical_snapshot(
     database: &Database,
     max_total_rows: Option<usize>,
+    budget: &mut ExecutionBudget,
 ) -> Result<BTreeMap<String, TableSnapshot>, WorkspaceError> {
     let mut tables = BTreeMap::new();
     let mut total_rows = 0usize;
@@ -2472,19 +2735,26 @@ fn logical_snapshot(
                 )));
             }
         }
-        let (columns, rows) = select_table(database, &table)?;
+        let (columns, rows) = select_table_with_budget(database, &table, Some(budget))?;
         debug_assert_eq!(rows.len(), row_count);
         tables.insert(table, TableSnapshot { columns, rows });
     }
     Ok(tables)
 }
 
-fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, WorkspaceError> {
+fn undo(
+    workspace: &Workspace,
+    requested_change_id: &str,
+    max_work: Option<usize>,
+) -> Result<UndoReport, WorkspaceError> {
     valid_id(requested_change_id)?;
     ensure_history_dirs(workspace)?;
-    let mut changes = load_changes(workspace)?;
+    let mut budget = max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
+    let mut changes = load_changes_for_operation(workspace, max_work.is_some())?;
     let database = workspace.database()?;
-    database.checkpoint()?;
+    database.checkpoint_with_budget(&mut budget)?;
     let current_state = state_fingerprint(&workspace.database_path())?;
     let current_generation = database.generation();
     reconcile_changes(workspace, &mut changes, &current_state, current_generation)?;
@@ -2551,6 +2821,7 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
             target.change_id
         )));
     }
+    let expected_state = logical_state_fingerprint(&target_snapshot)?;
     let undo_id = undo_change_id(&target.change_id, &current_state);
     let undo_file = change_path(workspace, &undo_id);
     if let Some(existing) = changes.iter().find(|change| change.change_id == undo_id) {
@@ -2589,7 +2860,7 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
         target_change_id: Some(target.change_id.clone()),
         base_generation: current_generation,
         base_state: current_state.clone(),
-        expected_state: Some(target.base_state.clone()),
+        expected_state: Some(expected_state),
         snapshot_id: undo_id.clone(),
         sql: None,
         status: ChangeStatus::Prepared,
@@ -2604,41 +2875,23 @@ fn undo(workspace: &Workspace, requested_change_id: &str) -> Result<UndoReport, 
         write_new_json(&undo_file, &undo_record)?;
     }
     let database_path = workspace.database_path();
-    drop(database);
-    if let Err(error) = truncate_wal(&database_path) {
+    if let Err(error) = database.restore_snapshot_with_budget(&target_snapshot, &mut budget) {
         undo_record.status = ChangeStatus::Unresolved;
         undo_record.error = Some(error.to_string());
         write_atomic_json(&undo_file, &undo_record)?;
-        return Err(error);
+        return Err(error.into());
     }
-    if let Err(error) = copy_atomic(&target_snapshot, &database_path) {
+    if let Err(error) = database.checkpoint_with_budget(&mut budget) {
         undo_record.status = ChangeStatus::Unresolved;
         undo_record.error = Some(error.to_string());
-        write_atomic_json(&undo_file, &undo_record)?;
-        return Err(error);
-    }
-    let restored = match Database::open_in_workspace(&database_path) {
-        Ok(database) => database,
-        Err(error) => {
-            undo_record.status = ChangeStatus::Unresolved;
-            undo_record.error = Some(error.to_string());
-            write_atomic_json(&undo_file, &undo_record)?;
-            return Err(error.into());
-        }
-    };
-    if let Err(error) = restored.checkpoint() {
-        undo_record.status = ChangeStatus::Unresolved;
-        undo_record.error = Some(error.to_string());
-        drop(restored);
         write_atomic_json(&undo_file, &undo_record)?;
         return Err(error.into());
     }
     let restored_state = state_fingerprint(&database_path)?;
-    let restored_generation = restored.generation();
+    let restored_generation = database.generation();
     if std::env::var_os("BASALT_CRASH_TEST_AFTER_UNDO_RESTORE").is_some() {
         std::process::abort();
     }
-    drop(restored);
     undo_record.status = ChangeStatus::Committed;
     undo_record.committed_generation = Some(restored_generation);
     undo_record.after_state = Some(restored_state.clone());
@@ -2706,14 +2959,19 @@ pub(crate) fn mcp_diff(
     workspace: &Workspace,
     change_id: Option<&str>,
 ) -> Result<DiffReport, WorkspaceError> {
-    diff_with_row_limit(workspace, change_id, Some(MAX_MCP_DIFF_ROWS))
+    diff_with_row_limit(
+        workspace,
+        change_id,
+        Some(MAX_MCP_DIFF_ROWS),
+        Some(MCP_EXECUTION_WORK_LIMIT),
+    )
 }
 
 pub(crate) fn mcp_undo(
     workspace: &Workspace,
     change_id: &str,
 ) -> Result<UndoReport, WorkspaceError> {
-    undo(workspace, change_id)
+    undo(workspace, change_id, Some(MCP_EXECUTION_WORK_LIMIT))
 }
 
 fn import_with_recovery(
@@ -2761,7 +3019,7 @@ fn import_with_recovery(
     let base_state = state_fingerprint(&workspace.database_path())?;
     let base_generation = database.generation();
     ensure_history_dirs(workspace)?;
-    let mut changes = load_changes(workspace)?;
+    let mut changes = load_changes_for_operation(workspace, limits.max_work.is_some())?;
     reconcile_changes(workspace, &mut changes, &base_state, base_generation)?;
 
     let request_table = table_name.unwrap_or("");
@@ -2892,7 +3150,7 @@ fn import_with_recovery(
         import.summary = summary.clone();
     }
 
-    if let Err(error) = database.checkpoint() {
+    if let Err(error) = database.checkpoint_with_budget(&mut preflight_budget) {
         change.status = ChangeStatus::Unresolved;
         change.error = Some(format!("import committed but checkpoint failed: {error}"));
         write_atomic_json(&change_file, &change)?;
@@ -3012,7 +3270,8 @@ pub(crate) fn mcp_export(
             "MCP export is limited to {MAX_MCP_EXPORT_ROWS} rows; use the CLI export for larger tables"
         )));
     }
-    let (columns, rows) = select_table(&database, table)?;
+    let mut budget = ExecutionBudget::bounded(MCP_EXECUTION_WORK_LIMIT);
+    let (columns, rows) = select_table_with_budget(&database, table, Some(&mut budget))?;
     debug_assert_eq!(rows.len(), row_count);
     let mut output = LimitedBuffer::new(max_content_bytes);
     let result = match format {
@@ -3280,9 +3539,23 @@ fn select_table(
     database: &Database,
     table: &str,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
+    select_table_with_budget(database, table, None)
+}
+
+fn select_table_with_budget(
+    database: &Database,
+    table: &str,
+    budget: Option<&mut ExecutionBudget>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
     validate_name(table, "table name")?;
     let sql = format!("SELECT * FROM {}", quote_identifier(table));
-    let results = database.execute_sql(&sql)?;
+    let results = match budget {
+        Some(budget) => {
+            let mut connection = database.connect();
+            connection.execute_sql_using_budget(&sql, budget)?
+        }
+        None => database.execute_sql(&sql)?,
+    };
     let Some(StatementResult::Select { columns, rows }) = results.into_iter().next() else {
         return Err(WorkspaceError::Invalid(
             "table query did not return rows".to_string(),
@@ -3751,7 +4024,9 @@ fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
                 fs::rename(&temporary, path).map_err(|_| error)
             }
             Err(error) => Err(error),
-        }
+        }?;
+        sync_parent(path)?;
+        Ok(())
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -3769,6 +4044,66 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
     let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    drop(file);
+    sync_parent(path)?;
+    Ok(())
+}
+
+fn cleanup_failed_init(
+    root: &Path,
+    remove_artifacts: bool,
+    remove_workspace_lock: bool,
+    remove_root_if_empty: bool,
+) -> Result<(), WorkspaceError> {
+    if remove_artifacts {
+        for name in [
+            MANIFEST_FILE,
+            DATABASE_FILE,
+            "data.basalt.wal",
+            "data.basalt.lock",
+            "data.basalt.tmp",
+        ] {
+            let path = root.join(name);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(WorkspaceError::Io(error)),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(WorkspaceError::Invalid(format!(
+                    "cannot clean failed workspace initialization artifact: {}",
+                    path.display()
+                )));
+            }
+            fs::remove_file(&path)?;
+        }
+    }
+    if remove_workspace_lock {
+        let path = root.join(WORKSPACE_LOCK_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => fs::remove_file(&path)?,
+            Ok(_) => {
+                return Err(WorkspaceError::Invalid(format!(
+                    "cannot clean failed workspace lock: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    sync_parent(root)?;
+    if remove_root_if_empty {
+        match fs::remove_dir(root) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
     Ok(())
 }
 
@@ -3778,6 +4113,23 @@ fn path_is_symlink(path: &Path) -> Result<bool, WorkspaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(WorkspaceError::Io(error)),
     }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let directory = File::open(parent)?;
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn acquire_workspace_lock(root: &Path) -> Result<Arc<File>, WorkspaceError> {
@@ -3841,6 +4193,15 @@ fn validate_database_paths(root: &Path) -> Result<(), WorkspaceError> {
             database.display()
         )));
     }
+    if !database.exists() {
+        let frame = crate::wal::latest(Path::new(&wal_value))?;
+        if frame.as_ref().is_none_or(|frame| frame.generation == 0) {
+            return Err(WorkspaceError::Invalid(format!(
+                "workspace database is missing and its WAL has no recoverable committed frame: {}",
+                database.display()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -3859,7 +4220,11 @@ fn temporary_path(destination: &Path) -> PathBuf {
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("export");
-    destination.with_file_name(format!(".{name}.basalt-tmp-{}-{stamp}", std::process::id()))
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    destination.with_file_name(format!(
+        ".{name}.basalt-tmp-{}-{stamp}-{counter}",
+        std::process::id()
+    ))
 }
 
 fn is_protected_workspace_path(workspace: &Workspace, destination: &Path) -> bool {
@@ -4015,6 +4380,29 @@ mod tests {
     }
 
     #[test]
+    fn init_rejects_reserved_database_sidecars_before_writing_a_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-init-sidecar-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let sidecar = root.join("data.basalt.lock");
+        fs::write(&sidecar, b"reserved").unwrap();
+
+        let error = Workspace::init(&root).unwrap_err();
+
+        assert!(error.to_string().contains("reserved database sidecar"));
+        assert!(!root.join(MANIFEST_FILE).exists());
+        assert!(!root.join(WORKSPACE_LOCK_FILE).exists());
+        assert_eq!(fs::read(&sidecar).unwrap(), b"reserved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_a_workspace_with_a_missing_database() {
         let root = std::env::temp_dir().join(format!(
             "basalt-workspace-missing-database-test-{}-{}",
@@ -4031,6 +4419,27 @@ mod tests {
         let error = Workspace::open(&root).unwrap_err();
         assert!(error.to_string().contains("workspace database is missing"));
         assert!(!root.join(DATABASE_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_missing_database_with_no_recoverable_wal_frame() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-empty-wal-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        drop(workspace);
+        fs::remove_file(root.join(DATABASE_FILE)).unwrap();
+        fs::write(root.join("data.basalt.wal"), []).unwrap();
+
+        let error = Workspace::open(&root).unwrap_err();
+
+        assert!(error.to_string().contains("no recoverable committed frame"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4072,6 +4481,29 @@ mod tests {
 
         let cells = enforce_import_limits(10_000, 101, limits).unwrap_err();
         assert!(cells.to_string().contains("limited to 1000000 cells"));
+    }
+
+    #[test]
+    fn mcp_history_bounds_non_record_directory_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-history-directory-limit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let changes = root.join(HISTORY_DIR).join(CHANGES_DIR);
+        fs::create_dir_all(&changes).unwrap();
+        fs::write(changes.join("first.tmp"), []).unwrap();
+        fs::write(changes.join("second.tmp"), []).unwrap();
+
+        let error = load_changes_with_limits(&workspace, Some(1), Some(1024)).unwrap_err();
+
+        assert!(error.to_string().contains("history directory exceeds"));
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4197,7 +4629,7 @@ mod tests {
             plan_id: None,
             target_change_id: None,
             base_generation: 0,
-            base_state: "sha256:base".to_string(),
+            base_state: format!("sha256:{}", "0".repeat(64)),
             expected_state: None,
             snapshot_id: change_id.clone(),
             sql: None,
@@ -4218,6 +4650,64 @@ mod tests {
                 .contains("history metadata exceeds the 1-byte limit")
         );
 
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_tampered_plan_statement_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-plan-integrity-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let plan = preview_plan(&workspace, "CREATE TABLE users (id INTEGER)").unwrap();
+        let path = plan_path(&workspace, &plan.plan_id);
+        let mut document = serde_json::to_value(&plan).unwrap();
+        document["statements"][0]["kind"] = JsonValue::String("select".to_string());
+        fs::write(&path, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+
+        let error = load_plan(&workspace, &plan.plan_id).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("statement metadata does not match")
+        );
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_duplicate_workspace_change_sequences() {
+        let root = std::env::temp_dir().join(format!(
+            "basalt-workspace-sequence-integrity-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = Workspace::init(&root).unwrap();
+        let report = mcp_import(&workspace, Some("users"), "csv", "id\n1\n").unwrap();
+        let changes = load_changes(&workspace).unwrap();
+        let mut duplicate = changes[0].clone();
+        duplicate.change_id = "b".repeat(64);
+        duplicate.snapshot_id = duplicate.change_id.clone();
+        write_new_json(&change_path(&workspace, &duplicate.change_id), &duplicate).unwrap();
+
+        let error = load_changes(&workspace).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate change sequence numbers")
+        );
+        assert_eq!(report.summary, "table users (1 rows, 1 columns)");
         drop(workspace);
         fs::remove_dir_all(root).unwrap();
     }

@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use futures::{SinkExt, StreamExt};
 use rmcp::handler::server::{
     router::tool::ToolRouter,
     tool::{InputResponses as ToolInputResponses, RequestState as ToolRequestState},
@@ -22,12 +23,16 @@ use rmcp::model::{
     ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
+use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::Transport;
+use rmcp::transport::async_rw::{JsonRpcMessageCodec, JsonRpcMessageCodecError};
 use rmcp::{
     ErrorData, Json, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
 use crate::database::{Connection, Database};
@@ -49,6 +54,7 @@ const MAX_SQL_BYTES: usize = 1_048_576;
 const MAX_STATEMENTS: usize = 100;
 const MAX_MUTATING_STATEMENTS: usize = 32;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
+const MAX_MCP_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 const SCHEMA_URI: &str = "basalt://schema";
 const WRITE_APPROVAL_INPUT_KEY: &str = "basalt_write_approval";
 const WRITE_APPROVAL_STATE_VERSION: u8 = 1;
@@ -267,7 +273,7 @@ fn run_target(target: McpTarget, allow_writes: bool) -> Result<(), String> {
     runtime.block_on(async move {
         let server = BasaltMcp::new(target, allow_writes);
         let service = server
-            .serve(rmcp::transport::stdio())
+            .serve(BoundedStdioTransport::new())
             .await
             .map_err(|error| format!("could not start MCP transport: {error:?}"))?;
         service
@@ -276,6 +282,95 @@ fn run_target(target: McpTarget, allow_writes: bool) -> Result<(), String> {
             .map(|_| ())
             .map_err(|error| format!("MCP transport stopped with an error: {error:?}"))
     })
+}
+
+/// Stdio MCP transport with a bounded input frame.
+///
+/// rmcp's convenience `stdio()` transport uses an unbounded line reader. The
+/// tool contracts below have smaller limits, but those limits are reached only
+/// after JSON-RPC decoding. Keep malformed or hostile input from growing the
+/// process buffer before that validation runs.
+type StdioWriter =
+    FramedWrite<tokio::io::Stdout, JsonRpcMessageCodec<TxJsonRpcMessage<RoleServer>>>;
+type SharedStdioWriter = Arc<tokio::sync::Mutex<Option<StdioWriter>>>;
+
+struct BoundedStdioTransport {
+    read: FramedRead<tokio::io::Stdin, JsonRpcMessageCodec<RxJsonRpcMessage<RoleServer>>>,
+    write: SharedStdioWriter,
+}
+
+impl BoundedStdioTransport {
+    fn new() -> Self {
+        let read = FramedRead::new(
+            tokio::io::stdin(),
+            JsonRpcMessageCodec::new_with_max_length(MAX_MCP_MESSAGE_BYTES),
+        );
+        let write = FramedWrite::new(
+            tokio::io::stdout(),
+            JsonRpcMessageCodec::new_with_max_length(MAX_MCP_MESSAGE_BYTES),
+        );
+        Self {
+            read,
+            write: Arc::new(tokio::sync::Mutex::new(Some(write))),
+        }
+    }
+}
+
+impl Transport<RoleServer> for BoundedStdioTransport {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let write = Arc::clone(&self.write);
+        async move {
+            let mut write = write.lock().await;
+            let Some(write) = write.as_mut() else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "MCP stdio transport is closed",
+                ));
+            };
+            write.send(item).await.map_err(Into::into)
+        }
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        loop {
+            match self.read.next().await {
+                Some(Ok(message)) => return Some(message),
+                None => return None,
+                Some(Err(JsonRpcMessageCodecError::Serde(error))) => match error.classify() {
+                    serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                        tracing::debug!("ignoring unparsable MCP input: {error}");
+                    }
+                    serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                        tracing::debug!("MCP protocol error on incoming message: {error}");
+                        let mut write = self.write.lock().await;
+                        let write = write.as_mut()?;
+                        let response = TxJsonRpcMessage::<RoleServer>::error(
+                            ErrorData::invalid_request("Invalid request", None),
+                            None,
+                        );
+                        if write.send(response).await.is_err() {
+                            return None;
+                        }
+                    }
+                },
+                Some(Err(error)) => {
+                    tracing::error!("MCP stdio transport read failed: {error}");
+                    return None;
+                }
+            }
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        let mut write = self.write.lock().await;
+        drop(write.take());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -705,7 +800,7 @@ impl BasaltMcp {
         tokio::task::spawn_blocking(move || match target {
             McpTarget::Database(_) => with_connection(&connection, |connection| {
                 connection
-                    .execute_sql("CHECKPOINT")
+                    .execute_sql_with_budget("CHECKPOINT", MCP_EXECUTION_WORK_LIMIT)
                     .map_err(|error| format!("checkpoint failed: {error}"))?;
                 let response = CheckpointResult {
                     generation: connection.generation(),
@@ -719,7 +814,7 @@ impl BasaltMcp {
                     .database()
                     .map_err(|error| format!("could not open workspace database: {error}"))?;
                 database
-                    .checkpoint()
+                    .execute_sql_with_budget("CHECKPOINT", MCP_EXECUTION_WORK_LIMIT)
                     .map_err(|error| format!("checkpoint failed: {error}"))?;
                 let response = CheckpointResult {
                     generation: database.generation(),
@@ -1762,5 +1857,20 @@ mod tests {
     fn mcp_encodes_non_finite_reals_as_text() {
         let encoded = serde_json::to_value(output_value(Value::Real(f64::INFINITY))).unwrap();
         assert_eq!(encoded, serde_json::json!({"type": "real", "value": "inf"}));
+    }
+
+    #[test]
+    fn mcp_stdio_codec_rejects_oversized_frames() {
+        let mut codec =
+            JsonRpcMessageCodec::<serde_json::Value>::new_with_max_length(MAX_MCP_MESSAGE_BYTES);
+        let mut input = tokio_util::bytes::BytesMut::with_capacity(MAX_MCP_MESSAGE_BYTES + 1);
+        input.resize(MAX_MCP_MESSAGE_BYTES + 1, b'x');
+
+        let error = tokio_util::codec::Decoder::decode(&mut codec, &mut input).unwrap_err();
+
+        assert!(matches!(
+            error,
+            JsonRpcMessageCodecError::MaxLineLengthExceeded
+        ));
     }
 }

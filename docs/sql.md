@@ -37,12 +37,21 @@ Numeric literals accept integers, decimals, leading-dot decimals, and `e`/`E`
 exponents. The minimum `INTEGER` literal is written as
 `-9223372036854775808`.
 
+The parser rejects expression nesting deeper than 128 levels or nested SQL
+statements deeper than 64 levels. These bounds keep malformed or adversarial
+input from exhausting the process call stack; they are independent of the
+CLI and MCP byte limits.
+
 ## Transactions and durability
 
 Durable snapshots are capped at 256 MiB of on-disk data. The write-ahead log
 is capped at 1 GiB; writes return a checkpoint-required limit error before the
 log can grow further. Basalt refuses symbolic links for durable database,
 snapshot, WAL, and lock paths.
+
+New WAL frames use version 2 with checksummed headers and payloads. Version 1
+WAL frames remain readable so an existing log can be opened during an upgrade;
+the next committed frame is written in version 2.
 
 If a snapshot is damaged, WAL recovery is used only when its generation is
 provably newer than the snapshot header. An older or same-generation WAL is

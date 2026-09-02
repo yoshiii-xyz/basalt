@@ -1,9 +1,9 @@
 //! Append-only write-ahead log for committed state snapshots.
 //!
-//! A frame is considered committed only after its complete payload and CRC
-//! have reached the WAL file.  Recovery accepts valid complete frames and
-//! repairs and ignores an incomplete final frame, which is the normal result
-//! of a killed process during append.
+//! A frame is considered committed only after its complete header, payload,
+//! and checksums have reached the WAL file. Recovery accepts valid complete
+//! frames and repairs and ignores an incomplete final frame, which is the
+//! normal result of a killed process during append.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -14,7 +14,8 @@ use crate::db::{DbError, DbErrorKind};
 use crate::storage;
 
 const MAGIC: &[u8; 4] = b"BSWL";
-const VERSION: u32 = 1;
+const LEGACY_VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER: usize = 32;
 /// Maximum total WAL size before callers must checkpoint.
 pub const MAX_WAL_BYTES: u64 = (storage::MAX_SNAPSHOT_BYTES as u64) * 4;
@@ -33,6 +34,12 @@ fn io_error(context: &str, e: io::Error) -> DbError {
     )
 }
 
+/// Append a committed frame.
+///
+/// Callers must provide a generation greater than every complete frame already
+/// in the file. [`latest`] validates that invariant during recovery; the
+/// database commit path supplies generations from its serialized commit lock
+/// without rescanning the full log for every append.
 pub fn append(path: &Path, generation: u64, payload: &[u8]) -> Result<(), DbError> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(limit("database state is too large for the WAL"));
@@ -54,6 +61,8 @@ pub fn append(path: &Path, generation: u64, payload: &[u8]) -> Result<(), DbErro
     header[8..16].copy_from_slice(&generation.to_le_bytes());
     header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
     header[24..28].copy_from_slice(&crc32(payload).to_le_bytes());
+    let header_checksum = crc32(&header[..28]);
+    header[28..32].copy_from_slice(&header_checksum.to_le_bytes());
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -86,6 +95,7 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
     let mut file = File::open(path).map_err(|e| io_error("open WAL", e))?;
     let mut offset = 0u64;
     let mut latest = None;
+    let mut previous_generation = None;
     loop {
         let mut header = [0u8; HEADER];
         let header_len =
@@ -101,10 +111,19 @@ pub fn latest(path: &Path) -> Result<Option<Frame>, DbError> {
             return Err(corrupt("invalid WAL magic"));
         }
         let version = u32_at(&header, 4)?;
-        if version != VERSION {
+        if version == VERSION {
+            let header_checksum = u32_at(&header, 28)?;
+            if crc32(&header[..28]) != header_checksum {
+                return Err(corrupt("WAL header checksum mismatch"));
+            }
+        } else if version != LEGACY_VERSION {
             return Err(corrupt("unsupported WAL version"));
         }
         let generation = u64_at(&header, 8)?;
+        if previous_generation.is_some_and(|previous| generation <= previous) {
+            return Err(corrupt("WAL generations are not strictly increasing"));
+        }
+        previous_generation = Some(generation);
         let declared_len = u64_at(&header, 16)?;
         if declared_len > MAX_PAYLOAD_BYTES as u64 {
             return Err(limit("WAL frame payload is too large"));
@@ -329,6 +348,9 @@ mod tests {
         header[4..8].copy_from_slice(&VERSION.to_le_bytes());
         header[8..16].copy_from_slice(&1u64.to_le_bytes());
         header[16..24].copy_from_slice(&(MAX_PAYLOAD_BYTES as u64 + 1).to_le_bytes());
+        header[24..28].copy_from_slice(&0u32.to_le_bytes());
+        let header_checksum = crc32(&header[..28]);
+        header[28..32].copy_from_slice(&header_checksum.to_le_bytes());
         fs::write(&path, header).unwrap();
 
         let error = latest(&path).unwrap_err();
@@ -358,6 +380,76 @@ mod tests {
 
         assert_eq!(error.kind, DbErrorKind::Limit);
         assert!(error.message.contains("WAL is too large"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_changed_v2_header_even_when_the_payload_is_intact() {
+        let dir =
+            std::env::temp_dir().join(format!("basalt-wal-header-corrupt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        append(&path, 1, b"one").unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8] ^= 1;
+        fs::write(&path, bytes).unwrap();
+
+        let error = latest(&path).unwrap_err();
+
+        assert!(error.message.contains("header checksum mismatch"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_non_monotonic_wal_generations_during_recovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "basalt-wal-generation-order-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        append(&path, 2, b"two").unwrap();
+        let payload = b"one";
+        let mut header = [0u8; HEADER];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        header[24..28].copy_from_slice(&crc32(payload).to_le_bytes());
+        let header_checksum = crc32(&header[..28]);
+        header[28..32].copy_from_slice(&header_checksum.to_le_bytes());
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&header).unwrap();
+        file.write_all(payload).unwrap();
+        file.sync_all().unwrap();
+
+        let error = latest(&path).unwrap_err();
+
+        assert!(error.message.contains("not strictly increasing"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_legacy_v1_frames_during_upgrade() {
+        let dir = std::env::temp_dir().join(format!("basalt-wal-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.wal");
+        let payload = b"legacy";
+        let mut header = [0u8; HEADER];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&LEGACY_VERSION.to_le_bytes());
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        header[24..28].copy_from_slice(&crc32(payload).to_le_bytes());
+        fs::write(&path, [header.as_slice(), payload].concat()).unwrap();
+
+        let frame = latest(&path).unwrap().unwrap();
+
+        assert_eq!(frame.generation, 1);
+        assert_eq!(frame.payload, payload);
         let _ = fs::remove_dir_all(dir);
     }
 

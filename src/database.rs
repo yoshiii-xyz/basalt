@@ -263,6 +263,43 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn restore_snapshot_with_budget(
+        &self,
+        snapshot_path: &Path,
+        budget: &mut crate::engine::ExecutionBudget,
+    ) -> Result<u64, DbError> {
+        let metadata = fs::symlink_metadata(snapshot_path).map_err(|error| {
+            dberr(
+                DbErrorKind::Io(format!("inspect recovery snapshot: {error}")),
+                format!("inspect recovery snapshot: {error}"),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(dberr(
+                DbErrorKind::Io("recovery snapshot cannot be a symbolic link".into()),
+                "recovery snapshot cannot be a symbolic link",
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(dberr(
+                DbErrorKind::Io("recovery snapshot is not a regular file".into()),
+                "recovery snapshot is not a regular file",
+            ));
+        }
+        let (state, snapshot_generation) = storage::read_snapshot(snapshot_path)?;
+        let current_generation = self.generation();
+        if snapshot_generation > current_generation {
+            return Err(dberr(
+                DbErrorKind::Transaction,
+                format!(
+                    "recovery snapshot generation {snapshot_generation} is newer than database generation {current_generation}"
+                ),
+            ));
+        }
+        budget.state_clone(&state, "preparing a database restore")?;
+        self.commit_state(state, current_generation)
+    }
+
     /// Current committed generation, useful for diagnostics and tests.
     pub fn generation(&self) -> u64 {
         self.inner.generation.load(Ordering::Acquire)
@@ -327,8 +364,14 @@ impl Database {
         let generation = actual
             .checked_add(1)
             .ok_or_else(|| dberr(DbErrorKind::Transaction, "transaction generation exhausted"))?;
+        let payload = state.encode();
+        if payload.len() > storage::MAX_SNAPSHOT_PAYLOAD_BYTES {
+            return Err(dberr(
+                DbErrorKind::Limit,
+                "database state is too large for the configured snapshot limit",
+            ));
+        }
         if let Some(wal_path) = &self.inner.wal_path {
-            let payload = state.encode();
             wal::append(wal_path, generation, &payload)?;
         }
         *current = state;
@@ -804,6 +847,7 @@ mod tests {
         drop(database);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(format!("{filename}.wal"));
+        let _ = std::fs::remove_file(format!("{filename}.lock"));
     }
 
     #[test]
