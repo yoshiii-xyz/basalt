@@ -152,9 +152,10 @@ metadata/history area. The layout is documented and safe to delete or copy.
 ### Import and export
 
 The first release supports predictable import/export for CSV, JSON/JSONL, and
-Basalt SQL dumps. Import reports inferred columns and row counts before it
-commits. Export is deterministic so a workspace can be inspected, backed up,
-or moved without a Basalt-specific opaque dependency.
+Basalt SQL dumps. Row imports infer columns, report row counts after a
+successful atomic commit, and leave the workspace unchanged on failure.
+Export is deterministic so a workspace can be inspected, backed up, or moved
+without a Basalt-specific opaque dependency.
 
 SQLite-file compatibility is not required for the first wedge, but importing a
 SQLite dump or a clearly documented subset must remain a planned escape hatch.
@@ -221,6 +222,17 @@ to the contract below.
 
 Exit condition: a user can create and move a useful workspace without writing
 an ingestion script or knowing the internal file layout.
+
+### Delivery status
+
+- Milestone 1 is complete: the evidence review and product contract are
+  recorded in this document.
+- Milestone 2 is implemented and covered by CLI integration tests: versioned
+  initialization, inspection, CSV/JSON/JSON Lines/SQL imports, deterministic
+  exports, reopen behavior, and failed-import rollback.
+- Milestones 3–5 remain open. Preview/apply approval, recovery history/undo,
+  the workspace-aware MCP surface, incumbent benchmarks, and normal-user
+  release artifacts are not complete yet.
 
 ### Milestone 3 — Reversible state
 

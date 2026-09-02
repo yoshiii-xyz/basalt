@@ -1,0 +1,96 @@
+# Basalt workspaces
+
+Basalt workspaces are local directories for structured data that needs to be
+queried or transformed without modifying an application database. The
+workspace commands are a thin lifecycle around the existing SQL engine; they
+do not create a service or a second database protocol.
+
+## Create and inspect
+
+```bash
+basalt init .basalt-workspace
+basalt workspace inspect .basalt-workspace
+basalt workspace inspect --json .basalt-workspace
+basalt workspace query --json .basalt-workspace "SELECT * FROM issues"
+```
+
+`basalt init PATH` is an alias for `basalt workspace init PATH`. Initialization
+refuses to replace an existing manifest or reserved database file. A workspace
+contains:
+
+```text
+.basalt-workspace/
+├── workspace.json       # format_version and canonical database name
+├── data.basalt          # Basalt snapshot
+├── data.basalt.wal      # committed frames awaiting checkpointing
+└── data.basalt.lock     # process-ownership lock
+```
+
+The manifest currently has format version `1` and always names
+`data.basalt`. The database format is Basalt's own format; it is not a SQLite
+file. A durable workspace is owned by one process at a time, just like a
+direct durable database path.
+
+## Import
+
+```bash
+basalt workspace import --table issues .basalt-workspace issues.csv
+basalt workspace import --table fixtures .basalt-workspace fixtures.json
+basalt workspace import --table events .basalt-workspace events.jsonl
+basalt workspace import .basalt-workspace backup.sql
+
+# Read a stream. Both the table and format are explicit.
+cat report.csv | basalt workspace import \
+  --table report --format csv .basalt-workspace -
+```
+
+File extensions infer `csv`, `json`, `jsonl`/`ndjson`, and `sql`. Use
+`--format` for stdin or another extension. Row-oriented imports use the file
+stem as the table name when `--table` is omitted. SQL imports contain a dump
+of one or more statements and must not include `BEGIN`, `COMMIT`, `ROLLBACK`,
+or `CHECKPOINT`; Basalt wraps the import in one transaction.
+
+CSV requires a header row. The importer uses the RFC 4180 parser, infers
+`INTEGER`, `REAL`, `BOOLEAN`, or `TEXT`, and keeps incompatible mixed values as
+text. Empty CSV fields become `NULL` for inferred numeric/boolean columns and
+empty text for text columns. JSON accepts one object, an array of objects, or
+JSON Lines objects. Missing and `null` fields become `NULL`; nested JSON is
+stored as compact text. Inputs are limited to 64 MiB and row imports are
+atomic.
+
+Imported tables have no inferred primary keys or other constraints. Add those
+with SQL after inspecting the imported data.
+
+## Query
+
+```bash
+basalt workspace query .basalt-workspace "SELECT * FROM issues ORDER BY id"
+basalt workspace query --json .basalt-workspace "SELECT COUNT(*) FROM issues"
+```
+
+The workspace query command accepts only `SELECT` and `EXPLAIN SELECT` and
+uses the existing table, CSV, or JSON Lines result renderers. Mutations stay
+out of this command until the preview/apply lifecycle is available.
+
+## Export
+
+```bash
+basalt workspace export .basalt-workspace issues issues.csv
+basalt workspace export --format jsonl .basalt-workspace issues -
+basalt workspace export --format sql .basalt-workspace issues issues.sql
+```
+
+CSV, JSON Lines, and SQL output are deterministic for the same database state.
+CSV uses an empty field for `NULL`; JSON Lines preserves typed JSON values; SQL
+contains a portable `CREATE TABLE` and `INSERT` sequence. User-created indexes
+are not included in SQL dumps. Export refuses to overwrite the workspace
+manifest or database and uses a temporary file before installing a regular
+output file.
+
+## Current boundary
+
+The workspace foundation provides `init`, `inspect`, read-only `query`,
+`import`, and `export`.
+Preview/apply approval, change history, and undo are intentionally separate
+work so they can be implemented and tested as one complete lifecycle. Do not
+describe the current workspace commands as an undo system yet.

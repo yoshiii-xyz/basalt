@@ -13,6 +13,14 @@ fn main() {
         run_mcp(&args[1..]);
         return;
     }
+    if args.first().map(String::as_str) == Some("workspace") {
+        run_workspace(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        run_workspace(&args);
+        return;
+    }
 
     let options = match cli::parse_args(&args) {
         Ok(options) => options,
@@ -71,6 +79,16 @@ fn run_mcp(args: &[String]) {
     if let Err(error) = basalt::mcp::run(database) {
         eprintln!("basalt mcp: {error}");
         std::process::exit(1);
+    }
+}
+
+fn run_workspace(args: &[String]) {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let mut output = io::stdout();
+    if let Err(error) = basalt::workspace::run(args, &mut input, &mut output) {
+        eprintln!("basalt workspace: {error}");
+        std::process::exit(error.exit_code());
     }
 }
 

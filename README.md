@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" alt="Basalt logo" width="128">
   <h1>Basalt</h1>
-  <p>A small, durable embedded SQL database written in Rust.</p>
+  <p>A CLI-first local SQL workspace for structured data and coding agents.</p>
   <p>
     <a href="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml">
       <img src="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml/badge.svg" alt="CI">
@@ -14,9 +14,9 @@
 
 Basalt is an embedded SQL database and command-line application built from
 scratch in Rust. It provides a small library API, an interactive shell,
-durable storage, snapshot-isolated transactions, crash recovery, and a stdio
-MCP server for AI agents. It focuses on readable end-to-end implementation,
-durable behavior, and practical command-line use.
+durable storage, snapshot-isolated transactions, crash recovery, portable
+structured-data workspaces, and a stdio MCP server for local AI agents. It is
+not a SQLite-compatible replacement or a hosted database.
 
 ## Highlights
 
@@ -29,6 +29,8 @@ durable behavior, and practical command-line use.
   state after a process crash.
 - Simple query planning with table scans, equality indexes, and range indexes.
 - Interactive and scriptable CLI output in table, CSV, and JSON-lines formats.
+- Portable workspaces with versioned metadata and atomic CSV, JSON/JSONL, and
+  SQL dump import/export.
 - Installable MCP server with typed SQL tools, schema resources, bounded
   results, and stateful transactions over one agent session.
 
@@ -72,6 +74,24 @@ appended to the WAL immediately; call `checkpoint()` to fold the current state
 into the snapshot and clear old WAL frames. A durable path is owned by one
 process at a time; cloned `Database` handles share that owner safely across
 threads, while a second process receives an "already open" error.
+
+## Workspaces
+
+Use a workspace when an agent or script needs a disposable, local relational
+area for CSV, JSON, logs, issue exports, or fixtures:
+
+```bash
+basalt init .basalt-workspace
+basalt workspace import --table issues .basalt-workspace issues.csv
+basalt workspace inspect --json .basalt-workspace
+basalt workspace query --json .basalt-workspace "SELECT * FROM issues ORDER BY id"
+basalt workspace export .basalt-workspace issues issues.jsonl
+```
+
+Imports are atomic and exports are deterministic. The workspace directory can
+be copied or inspected with ordinary tools; its current foundation does not
+yet provide preview/apply approval, history, or undo. See
+[docs/workspaces.md](docs/workspaces.md) for the format and boundaries.
 
 ## MCP server
 
@@ -154,9 +174,11 @@ calls.
 | src/db.rs, src/database.rs | Tables, constraints, transactions, and API |
 | src/storage.rs, src/wal.rs | Snapshots, checksums, and recovery |
 | src/cli.rs | Interactive and scripted command-line frontend |
+| src/workspace.rs | Local workspace lifecycle and data interchange |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
 | docs/sql.md | Supported SQL dialect and transaction semantics |
 | docs/mcp.md | MCP installation, configuration, and tool contract |
+| docs/workspaces.md | Workspace layout and import/export contract |
 | tests/ | Integration and crash-recovery coverage |
 | benches/ | Throughput benchmark |
 

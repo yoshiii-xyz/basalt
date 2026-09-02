@@ -12,5 +12,6 @@ pub mod sql;
 pub mod storage;
 pub mod types;
 pub mod wal;
+pub mod workspace;
 
 pub use database::{Connection, Database, Transaction};

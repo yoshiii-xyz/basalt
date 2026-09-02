@@ -34,12 +34,14 @@ do not claim an audit was performed when the tool was unavailable.
 1. Install the binary from the checkout with `cargo install --path . --locked`.
 2. Create a durable database with the CLI, query it in table/CSV/JSON-lines
    modes, close it, and query it again.
-3. Exercise `BEGIN`, `COMMIT`, and `ROLLBACK` across repeated `--command`
+3. Create a workspace, import a representative CSV or JSON Lines file,
+   inspect it, export it as CSV/JSON Lines/SQL, and reopen the workspace.
+4. Exercise `BEGIN`, `COMMIT`, and `ROLLBACK` across repeated `--command`
    actions and through the interactive shell.
-4. Start `basalt mcp :memory:` and verify `server/discover` (or legacy
+5. Start `basalt mcp :memory:` and verify `server/discover` (or legacy
    `initialize`), `tools/list`, `tools/call`, `resources/list`, and
    `resources/read` over newline-delimited JSON-RPC on stdout.
-5. Verify a durable MCP database survives a server restart and that all
+6. Verify a durable MCP database survives a server restart and that all
    diagnostics stay off stdout.
 
 ## Release review

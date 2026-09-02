@@ -19,6 +19,7 @@ Usage:\n  basalt [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Options:\n  -c, --command SQL       Execute SQL and exit; may be repeated\n  -f, --file PATH         Execute a SQL script and exit; '-' reads stdin\n  -o, --output FORMAT     Result format: table, csv, or json\n      --table             Use table output (the default)\n      --csv               Use CSV output\n      --json              Use JSON-lines output\n      --no-header         Omit column headers in table/CSV output\n      --quiet             Suppress non-query success messages\n  -h, --help              Print this help\n  -V, --version           Print the version\n\n\
 Interactive commands:\n  .help                   Show this help\n  .tables                 List tables\n  .schema [TABLE]         Show CREATE TABLE statements\n  .mode table|csv|json    Change result format\n  .headers on|off         Toggle result headers\n  .checkpoint             Flush the snapshot and truncate the WAL\n  .show                   Show frontend state\n  .clear                  Discard the pending SQL buffer\n  .quit, .exit            Leave the shell\n\n\
 MCP server:\n  basalt mcp [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
+Workspace:\n  basalt init PATH\n  basalt workspace --help\n\n\
 JSON output is one JSON object per statement (JSON Lines). CSV output emits\n\
 only query rows, so it can be piped directly into another data tool.\n";
 
