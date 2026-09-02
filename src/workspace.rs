@@ -2387,7 +2387,10 @@ pub(crate) fn mcp_import(
     let change_file = change_path(workspace, &change_id);
     let mut change = ChangeRecord {
         format_version: FORMAT_VERSION,
-        sequence: retry_sequence.unwrap_or(next_sequence(&changes)?),
+        sequence: match retry_sequence {
+            Some(sequence) => sequence,
+            None => next_sequence(&changes)?,
+        },
         change_id: change_id.clone(),
         kind: ChangeKind::Apply,
         plan_id: None,
