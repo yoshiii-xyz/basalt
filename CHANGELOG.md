@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — Unreleased
 
 - Preserved monotonic database generations during workspace undo by restoring
   the verified logical state through a new WAL commit instead of copying an

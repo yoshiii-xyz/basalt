@@ -72,7 +72,8 @@ checks.
 The [production-readiness contract](production-readiness.md) is the authority
 for technical scope, fixed limits, backup/restore, and evidence. The public
 `v0.1.1` artifacts do not automatically include hardening committed after that
-release; publish a new version only after its package, archives, checksums,
+release; the current hardened candidate is `v0.1.2`. Publish a new version only
+after its package, archives, checksums,
 installer, and registry metadata are verified together.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,

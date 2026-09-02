@@ -113,8 +113,9 @@ adoption claim. Record external-user results separately in
 ## Release status
 
 The public crate, binary release, and MCP Registry entry may remain one
-version behind the current unreleased hardening branch. Do not describe a
-candidate version as publicly available until its crate, tag, archives,
+version behind the current hardening branch. The current candidate is `0.1.2`;
+the public artifacts remain `0.1.1` until the release procedure completes.
+Do not describe a candidate version as publicly available until its crate, tag, archives,
 checksums, installer, and registry metadata have each been verified. A fresh
 crates.io publish requires fresh operator authorization; no repository file
 stores registry credentials.
