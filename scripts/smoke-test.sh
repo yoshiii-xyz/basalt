@@ -84,6 +84,7 @@ grep -Fq '"serverInfo"' <<<"$mcp_output"
 grep -Fq '"workspace_import"' <<<"$mcp_output"
 grep -Fq 'writes are disabled' <<<"$mcp_output"
 grep -Fq '"workspace_preview"' <<<"$mcp_output"
+grep -Fq '"workspace_plan"' <<<"$mcp_output"
 grep -Fq '"workspace_inspect"' <<<"$mcp_output"
 grep -Fq '"users"' <<<"$mcp_output"
 

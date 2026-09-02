@@ -108,6 +108,7 @@ def main() -> None:
             "query",
             "workspace_import",
             "workspace_preview",
+            "workspace_plan",
             "workspace_apply",
             "workspace_diff",
             "workspace_undo",
@@ -164,9 +165,19 @@ def main() -> None:
             raise RuntimeError(f"preview did not return exact SQL: {preview}")
         plan_id = preview["plan_id"]
 
-        applied = call(
+        reloaded = call(
             server,
             6,
+            "workspace_plan",
+            {"plan_id": plan_id},
+            MODERN_METADATA,
+        )
+        if reloaded["sql"] != preview["sql"] or reloaded["plan_id"] != plan_id:
+            raise RuntimeError(f"saved plan could not be reloaded: {reloaded}")
+
+        applied = call(
+            server,
+            7,
             "workspace_apply",
             {"plan_id": plan_id},
             MODERN_METADATA,
@@ -177,7 +188,7 @@ def main() -> None:
 
         diff = call(
             server,
-            7,
+            8,
             "workspace_diff",
             {"change_id": applied_change_id},
             MODERN_METADATA,
@@ -187,7 +198,7 @@ def main() -> None:
 
         undone = call(
             server,
-            8,
+            9,
             "workspace_undo",
             {"change_id": applied_change_id},
             MODERN_METADATA,
@@ -197,7 +208,7 @@ def main() -> None:
 
         exported = call(
             server,
-            9,
+            10,
             "workspace_export",
             {"table": "mcp_users", "format": "csv"},
             MODERN_METADATA,
