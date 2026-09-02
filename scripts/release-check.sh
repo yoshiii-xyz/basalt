@@ -36,6 +36,7 @@ run_check cargo check --all-targets --locked
 run_check cargo clippy --all-targets --all-features --locked -- -D warnings
 run_check cargo test --all-targets --locked
 run_check env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --locked
+run_check cargo package --locked
 run_check cargo publish --dry-run --locked
 run_check cargo build --release --locked
 run_check bash scripts/smoke-test.sh "$target_dir/release/basalt"
