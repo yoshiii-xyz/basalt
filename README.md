@@ -214,7 +214,9 @@ Use `--file -` to read SQL from stdin. Repeat `--command` and `--file` as
 needed; they execute in the order they appear. Table output is human-readable,
 CSV emits query rows, and `--json` emits one JSON object per statement. Run
 `.help` inside the shell for `.tables`, `.schema`, `.mode`, `.headers`,
-`.checkpoint`, `.show`, and `.clear`.
+`.checkpoint`, `.show`, and `.clear`. Each CLI SQL action and the pending
+interactive buffer is limited to 16 MiB; larger scripts should be split into
+smaller actions or use the bounded workspace import formats.
 
 ## Library usage
 

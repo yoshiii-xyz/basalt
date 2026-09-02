@@ -14,6 +14,12 @@ use crate::db::{Column, DbError, StatementResult};
 use crate::sql::parser::parse;
 use crate::types::{ColumnType, Value};
 
+/// Maximum SQL source accepted by one CLI action or the interactive buffer.
+///
+/// The direct CLI is intentionally less restrictive than MCP, but it still
+/// needs a finite parser/input boundary for scripts and piped agent output.
+pub const MAX_SQL_INPUT_BYTES: usize = 16 * 1024 * 1024;
+
 pub const HELP: &str = "Basalt — embedded SQL database\n\n\
 Usage:\n  basalt [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Options:\n  -c, --command SQL       Execute SQL and exit; may be repeated\n  -f, --file PATH         Execute a SQL script and exit; '-' reads stdin\n  -o, --output FORMAT     Result format: table, csv, or json\n      --table             Use table output (the default)\n      --csv               Use CSV output\n      --json              Use JSON-lines output\n      --no-header         Omit column headers in table/CSV output\n      --quiet             Suppress non-query success messages\n  -h, --help              Print this help\n  -V, --version           Print the version\n\n\
@@ -21,7 +27,8 @@ Interactive commands:\n  .help                   Show this help\n  .tables      
 MCP server:\n  basalt mcp [OPTIONS] [DATABASE_PATH | :memory:]\n\n\
 Workspace:\n  basalt init PATH\n  basalt workspace --help\n\n\
 JSON output is one JSON object per statement (JSON Lines). CSV output emits\n\
-only query rows, so it can be piped directly into another data tool.\n";
+only query rows, so it can be piped directly into another data tool. Each CLI\n\
+SQL action and interactive input buffer is limited to 16 MiB.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -277,19 +284,18 @@ fn run_actions<R: BufRead>(
     let mut connection = database.connect();
     for action in &options.actions {
         let (source, sql) = match action {
-            InputAction::Command(sql) => ("command line".to_string(), sql.clone()),
+            InputAction::Command(sql) => {
+                let source = "command line".to_string();
+                validate_sql_input(sql, &source)?;
+                (source, sql.clone())
+            }
             InputAction::File(path) if path == "-" => {
-                let mut sql = String::new();
-                input.read_to_string(&mut sql)?;
-                ("stdin".to_string(), sql)
+                ("stdin".to_string(), read_sql(&mut *input, "stdin")?)
             }
             InputAction::File(path) => {
-                let mut sql = String::new();
-                File::open(path)
-                    .map_err(|error| CliError::new(format!("{path}: {error}")))?
-                    .read_to_string(&mut sql)
-                    .map_err(|error| CliError::new(format!("{path}: {error}")))?;
-                (path.clone(), sql)
+                let file =
+                    File::open(path).map_err(|error| CliError::new(format!("{path}: {error}")))?;
+                (path.clone(), read_sql(file, path)?)
             }
         };
         let results = connection
@@ -322,7 +328,12 @@ fn run_interactive<R: BufRead>(
     output.flush()?;
     loop {
         let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
+        if read_interactive_line(
+            input,
+            &mut line,
+            MAX_SQL_INPUT_BYTES.saturating_sub(buffer.len()),
+        )? == 0
+        {
             if !buffer.trim().is_empty() {
                 execute_interactive_sql(
                     &mut connection,
@@ -455,6 +466,65 @@ fn execute_interactive_sql(
         Err(error) => writeln!(output, "error: {error}")?,
     }
     Ok(())
+}
+
+fn read_sql<R: Read>(reader: R, source: &str) -> Result<String, CliError> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take((MAX_SQL_INPUT_BYTES as u64).saturating_add(1));
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| CliError::new(format!("{source}: {error}")))?;
+    if bytes.len() > MAX_SQL_INPUT_BYTES {
+        return Err(CliError::new(format!(
+            "{source}: SQL input exceeds the {MAX_SQL_INPUT_BYTES}-byte limit"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| CliError::new(format!("{source}: SQL input is not valid UTF-8")))
+}
+
+fn validate_sql_input(sql: &str, source: &str) -> Result<(), CliError> {
+    if sql.len() > MAX_SQL_INPUT_BYTES {
+        return Err(CliError::new(format!(
+            "{source}: SQL input exceeds the {MAX_SQL_INPUT_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn read_interactive_line<R: BufRead>(
+    input: &mut R,
+    line: &mut String,
+    remaining: usize,
+) -> io::Result<usize> {
+    let mut total = 0;
+    loop {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            return Ok(total);
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let chunk_len = newline.map_or(available.len(), |index| index + 1);
+        if chunk_len > remaining.saturating_sub(total) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("interactive SQL input exceeds the {MAX_SQL_INPUT_BYTES}-byte limit"),
+            ));
+        }
+        let chunk = &available[..chunk_len];
+        let chunk_text = std::str::from_utf8(chunk).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "interactive input is not valid UTF-8",
+            )
+        })?;
+        line.push_str(chunk_text);
+        input.consume(chunk_len);
+        total += chunk_len;
+        if newline.is_some() {
+            return Ok(total);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1101,5 +1171,25 @@ mod tests {
         run(&options, Database::in_memory(), &mut input, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\"rows\":[]"));
+    }
+
+    #[test]
+    fn bounded_sql_reader_rejects_input_larger_than_the_cli_contract() {
+        let input = vec![b'x'; MAX_SQL_INPUT_BYTES + 1];
+        let error = read_sql(Cursor::new(input), "stdin").unwrap_err();
+        assert!(error.to_string().contains("SQL input exceeds"));
+
+        let sql = "x".repeat(MAX_SQL_INPUT_BYTES + 1);
+        let error = validate_sql_input(&sql, "command line").unwrap_err();
+        assert!(error.to_string().contains("SQL input exceeds"));
+    }
+
+    #[test]
+    fn interactive_line_reader_enforces_remaining_buffer_capacity() {
+        let mut input = Cursor::new(b"SELECT 1\n".to_vec());
+        let mut line = String::new();
+        let error = read_interactive_line(&mut input, &mut line, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("interactive SQL input exceeds"));
     }
 }
