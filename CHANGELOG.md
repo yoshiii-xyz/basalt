@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bounded MCP and workspace preview requests to 32 mutating statements per
+  call, in addition to their existing SQL and statement limits.
+- Bounded workspace MCP exports by row count and content size before building a
+  response, directing larger exports to the CLI.
 - Hardened workspace export protection so path aliases cannot overwrite the
   workspace database or manifest.
 - Made exact workspace apply and undo retries return the original receipt after

@@ -776,6 +776,51 @@ fn workspace_mcp_import_is_reversible_and_rejects_sql_dumps() {
 }
 
 #[test]
+fn workspace_mcp_export_rejects_large_tables_before_serializing_them() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let init = Command::new(env!("CARGO_BIN_EXE_basalt"))
+        .args(["workspace", "init", path_arg(&workspace)])
+        .output()
+        .expect("workspace init should run");
+    assert!(init.status.success(), "workspace init failed: {init:?}");
+
+    let content = (1..=10_001).map(|id| format!("{id}\n")).collect::<String>();
+    let mut server = McpProcess::start_with_workspace(&workspace, true);
+    initialize_legacy(&mut server);
+    let imported = server.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "workspace_import",
+            "arguments": {
+                "table": "events",
+                "format": "csv",
+                "content": format!("id\n{content}")
+            }
+        }),
+    );
+    assert_ne!(result(&imported)["isError"], true);
+
+    let exported = server.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "workspace_export",
+            "arguments": {"table": "events", "format": "csv"}
+        }),
+    );
+    assert_eq!(result(&exported)["isError"], true);
+    assert!(
+        result(&exported)["content"][0]["text"]
+            .as_str()
+            .expect("export rejection should include text")
+            .contains("limited to 10000 rows")
+    );
+    server.close();
+}
+
+#[test]
 fn workspace_mcp_import_reconciles_an_interrupted_commit() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");

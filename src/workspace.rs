@@ -32,7 +32,9 @@ pub(crate) const MAX_MCP_IMPORT_BYTES: usize = 16 * 1024 * 1024;
 const IMPORT_BATCH_SIZE: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_STATEMENTS: usize = 64;
+const MAX_PREVIEW_MUTATIONS: usize = 32;
 const MAX_PREVIEW_ROWS: usize = 10_000;
+const MAX_MCP_EXPORT_ROWS: usize = 10_000;
 const HISTORY_DIR: &str = "history";
 const PLANS_DIR: &str = "plans";
 const CHANGES_DIR: &str = "changes";
@@ -1356,6 +1358,15 @@ fn preview_plan_with_output_limit(
             "preview accepts at most {MAX_PREVIEW_STATEMENTS} statements"
         )));
     }
+    let mutating_statements = statements
+        .iter()
+        .filter(|statement| is_mutation_statement(statement))
+        .count();
+    if mutating_statements > MAX_PREVIEW_MUTATIONS {
+        return Err(WorkspaceError::Invalid(format!(
+            "preview accepts at most {MAX_PREVIEW_MUTATIONS} mutating statements"
+        )));
+    }
     if statements.iter().any(statement_contains_control) {
         return Err(WorkspaceError::Invalid(
             "preview SQL must not contain BEGIN, COMMIT, ROLLBACK, or CHECKPOINT".to_string(),
@@ -2528,6 +2539,7 @@ pub(crate) fn mcp_export(
     workspace: &Workspace,
     table: &str,
     format: &str,
+    max_content_bytes: usize,
 ) -> Result<ExportReport, WorkspaceError> {
     let format = DataFormat::parse(format)?;
     if format == DataFormat::Json {
@@ -2536,19 +2548,36 @@ pub(crate) fn mcp_export(
         ));
     }
     let database = workspace.database()?;
-    let (columns, rows) = select_table(&database, table)?;
-    let bytes = match format {
-        DataFormat::Csv => export_csv(&columns, &rows)?,
-        DataFormat::JsonLines => export_json_lines(&columns, &rows)?,
-        DataFormat::Sql => export_sql(&database, table, &rows)?,
+    let (columns, rows) = select_table_with_limit(
+        &database,
+        table,
+        Some(MAX_MCP_EXPORT_ROWS.saturating_add(1)),
+    )?;
+    if rows.len() > MAX_MCP_EXPORT_ROWS {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP export is limited to {MAX_MCP_EXPORT_ROWS} rows; use the CLI export for larger tables"
+        )));
+    }
+    let mut output = LimitedBuffer::new(max_content_bytes);
+    let result = match format {
+        DataFormat::Csv => write_csv(&columns, &rows, &mut output),
+        DataFormat::JsonLines => write_json_lines(&columns, &rows, &mut output),
+        DataFormat::Sql => write_sql(&database, table, &rows, &mut output),
         DataFormat::Json => unreachable!(),
     };
-    let content = String::from_utf8(bytes.clone())
+    if output.exceeded {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP export exceeds the {max_content_bytes}-byte content limit"
+        )));
+    }
+    result?;
+    let content = String::from_utf8(output.into_inner())
         .map_err(|error| WorkspaceError::Invalid(format!("export is not valid UTF-8: {error}")))?;
+    let bytes = content.len();
     Ok(ExportReport {
         table: table.to_string(),
         format: format.name().to_string(),
-        bytes: bytes.len(),
+        bytes,
         content,
     })
 }
@@ -2788,8 +2817,19 @@ fn select_table(
     database: &Database,
     table: &str,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
+    select_table_with_limit(database, table, None)
+}
+
+fn select_table_with_limit(
+    database: &Database,
+    table: &str,
+    limit: Option<usize>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), WorkspaceError> {
     validate_name(table, "table name")?;
-    let sql = format!("SELECT * FROM {}", quote_identifier(table));
+    let sql = match limit {
+        Some(limit) => format!("SELECT * FROM {} LIMIT {limit}", quote_identifier(table)),
+        None => format!("SELECT * FROM {}", quote_identifier(table)),
+    };
     let results = database.execute_sql(&sql)?;
     let Some(StatementResult::Select { columns, rows }) = results.into_iter().next() else {
         return Err(WorkspaceError::Invalid(
@@ -2800,30 +2840,48 @@ fn select_table(
 }
 
 fn export_csv(columns: &[String], rows: &[Vec<Value>]) -> Result<Vec<u8>, WorkspaceError> {
-    let mut writer = Writer::from_writer(Vec::new());
+    let mut output = Vec::new();
+    write_csv(columns, rows, &mut output)?;
+    Ok(output)
+}
+
+fn write_csv<W: Write>(
+    columns: &[String],
+    rows: &[Vec<Value>],
+    output: &mut W,
+) -> Result<(), WorkspaceError> {
+    let mut writer = Writer::from_writer(output);
     writer.write_record(columns)?;
     for row in rows {
         ensure_row_width(columns, row)?;
         let values = row.iter().map(csv_field).collect::<Vec<_>>();
         writer.write_record(values)?;
     }
-    writer
-        .into_inner()
-        .map_err(|error| WorkspaceError::Invalid(format!("could not finish CSV export: {error}")))
+    writer.flush()?;
+    Ok(())
 }
 
 fn export_json_lines(columns: &[String], rows: &[Vec<Value>]) -> Result<Vec<u8>, WorkspaceError> {
     let mut output = Vec::new();
+    write_json_lines(columns, rows, &mut output)?;
+    Ok(output)
+}
+
+fn write_json_lines<W: Write>(
+    columns: &[String],
+    rows: &[Vec<Value>],
+    output: &mut W,
+) -> Result<(), WorkspaceError> {
     for row in rows {
         ensure_row_width(columns, row)?;
         let mut object = Map::new();
         for (column, value) in columns.iter().zip(row) {
             object.insert(column.clone(), value_to_json(value)?);
         }
-        serde_json::to_writer(&mut output, &JsonValue::Object(object))?;
-        output.push(b'\n');
+        serde_json::to_writer(&mut *output, &JsonValue::Object(object))?;
+        output.write_all(b"\n")?;
     }
-    Ok(output)
+    Ok(())
 }
 
 fn export_sql(
@@ -2831,18 +2889,26 @@ fn export_sql(
     table: &str,
     rows: &[Vec<Value>],
 ) -> Result<Vec<u8>, WorkspaceError> {
+    let mut output = Vec::new();
+    write_sql(database, table, rows, &mut output)?;
+    Ok(output)
+}
+
+fn write_sql<W: Write>(
+    database: &Database,
+    table: &str,
+    rows: &[Vec<Value>],
+    output: &mut W,
+) -> Result<(), WorkspaceError> {
     let columns = database.columns(table)?;
-    let mut output = String::new();
-    output.push_str("CREATE TABLE ");
-    output.push_str(&quote_identifier(table));
-    output.push_str(" (");
+    write!(output, "CREATE TABLE {} (", quote_identifier(table))?;
     for (index, column) in columns.iter().enumerate() {
         if index > 0 {
-            output.push_str(", ");
+            output.write_all(b", ")?;
         }
-        output.push_str(&column_definition(column));
+        output.write_all(column_definition(column).as_bytes())?;
     }
-    output.push_str(");\n");
+    output.write_all(b");\n")?;
     for row in rows {
         ensure_row_width(
             &columns
@@ -2851,18 +2917,54 @@ fn export_sql(
                 .collect::<Vec<_>>(),
             row,
         )?;
-        output.push_str("INSERT INTO ");
-        output.push_str(&quote_identifier(table));
-        output.push_str(" VALUES (");
+        write!(output, "INSERT INTO {} VALUES (", quote_identifier(table))?;
         for (index, value) in row.iter().enumerate() {
             if index > 0 {
-                output.push_str(", ");
+                output.write_all(b", ")?;
             }
-            output.push_str(&sql_literal(value));
+            output.write_all(sql_literal(value).as_bytes())?;
         }
-        output.push_str(");\n");
+        output.write_all(b");\n")?;
     }
-    Ok(output.into_bytes())
+    Ok(())
+}
+
+struct LimitedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl LimitedBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for LimitedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "export content limit exceeded",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn column_definition(column: &Column) -> String {

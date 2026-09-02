@@ -221,6 +221,13 @@ provide a multi-call SQL transaction; the durable plan and recovery lifecycle
 is the transaction boundary. `workspace_apply` rejects stale plans and never
 silently applies a mutation against a changed base state.
 
+Workspace previews accept at most 64 statements and 32 mutating statements per
+call. This bounds the impact described by one plan; larger jobs should be
+split into separately reviewed plans.
+
+Workspace exports return at most 10,000 rows and 1 MiB of raw content before
+the MCP response-size check. Use the CLI export for larger tables or files.
+
 The import, apply, and undo calls are retry-safe for lost responses. Their
 identifiers and persisted request metadata let an exact retry return the
 original receipt when the workspace is still at the recorded post-operation
@@ -269,8 +276,8 @@ example `{ "type": "integer", "value": 1 }`, `{ "type": "real", "value": "1.5" }
 or `{ "type": "null" }`. Real values are strings so non-finite results cannot
 break JSON serialization and clients can choose their own numeric precision.
 Responses larger than 1 MiB are rejected with an actionable error; narrow the
-projection or lower `max_rows` when that happens. SQL input is limited to 1 MiB
-and 100 statements per call.
+projection or lower `max_rows` when that happens. SQL input is limited to 1 MiB,
+100 statements, and 32 mutating statements per call.
 
 The `basalt://schema` resource contains the current committed table and column
 metadata as `application/json`. It is useful when an agent needs schema context

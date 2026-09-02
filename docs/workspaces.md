@@ -82,9 +82,9 @@ basalt workspace preview --json .basalt-workspace \
 ```
 
 The returned report includes the exact SQL, impact summary, and a `plan_id`
-derived from that SQL and the current database state fingerprint. Review the
-SQL before applying the plan; apply requires that plan ID and refuses a stale
-plan:
+derived from that SQL and the current database state fingerprint. A preview
+accepts at most 64 statements and 32 mutating statements. Review the SQL before
+applying the plan; apply requires that plan ID and refuses a stale plan:
 
 ```bash
 basalt workspace apply --json .basalt-workspace PLAN_ID

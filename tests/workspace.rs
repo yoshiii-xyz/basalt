@@ -261,6 +261,28 @@ fn refuses_export_paths_that_alias_workspace_metadata() {
 }
 
 #[test]
+fn rejects_preview_with_too_many_mutating_statements() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    assert!(run(&["init", path_arg(&workspace)]).status.success());
+    let sql = (0..33)
+        .map(|index| format!("CREATE TABLE table_{index} (id INTEGER)"))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let output = run(&["workspace", "preview", path_arg(&workspace), sql.as_str()]);
+    assert!(
+        !output.status.success(),
+        "preview unexpectedly succeeded: {output:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("preview accepts at most 32 mutating statements"),
+        "unexpected preview error: {output:?}"
+    );
+}
+
+#[test]
 fn json_import_and_sql_roundtrip_are_deterministic() {
     let temp = TempDir::new();
     let workspace = temp.path().join("json-workspace");

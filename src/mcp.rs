@@ -36,6 +36,7 @@ const DEFAULT_MAX_ROWS: usize = 100;
 const MAX_ROWS: usize = 1_000;
 const MAX_SQL_BYTES: usize = 1_048_576;
 const MAX_STATEMENTS: usize = 100;
+const MAX_MUTATING_STATEMENTS: usize = 32;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const SCHEMA_URI: &str = "basalt://schema";
 
@@ -251,7 +252,7 @@ fn run_target(target: McpTarget, allow_writes: bool) -> Result<(), String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct SqlInput {
-    /// SQL to execute. The server accepts up to 1 MiB and 100 statements per call.
+    /// SQL to execute. The server accepts up to 1 MiB, 100 statements, and 32 mutating statements per call.
     sql: String,
     /// Maximum rows returned for each SELECT result. Defaults to 100 and is capped at 1,000.
     #[serde(default)]
@@ -875,7 +876,7 @@ impl BasaltMcp {
     ) -> Result<Json<crate::workspace::ExportReport>, String> {
         let workspace = self.target.workspace()?;
         let response = tokio::task::spawn_blocking(move || {
-            crate::workspace::mcp_export(&workspace, &input.table, &input.format)
+            crate::workspace::mcp_export(&workspace, &input.table, &input.format, MAX_OUTPUT_BYTES)
         })
         .await
         .map_err(|error| format!("workspace export task failed: {error}"))?
@@ -1046,7 +1047,30 @@ fn validate_sql(sql: &str, read_only: bool) -> Result<(), String> {
             "query accepts SELECT and EXPLAIN SELECT only; use execute for database changes".into(),
         );
     }
+    let mutating_statements = statements
+        .iter()
+        .filter(|statement| is_mutating_statement(statement))
+        .count();
+    if mutating_statements > MAX_MUTATING_STATEMENTS {
+        return Err(format!(
+            "request contains {mutating_statements} mutating statements; limit is {MAX_MUTATING_STATEMENTS}"
+        ));
+    }
     Ok(())
+}
+
+fn is_mutating_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::CreateTable { .. }
+            | Statement::DropTable { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::DropIndex { .. }
+            | Statement::Insert { .. }
+            | Statement::InsertSelect { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+    )
 }
 
 fn is_read_only(statement: &Statement) -> bool {
@@ -1256,6 +1280,17 @@ mod tests {
     fn mcp_rejects_mutating_query() {
         let error = validate_sql("DELETE FROM users", true).unwrap_err();
         assert!(error.contains("SELECT"));
+    }
+
+    #[test]
+    fn mcp_limits_mutating_statements_per_request() {
+        let sql = (0..=MAX_MUTATING_STATEMENTS)
+            .map(|index| format!("CREATE TABLE table_{index} (id INTEGER)"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = validate_sql(&sql, false).unwrap_err();
+        assert!(error.contains("mutating statements"));
+        assert!(error.contains("limit is 32"));
     }
 
     #[test]
