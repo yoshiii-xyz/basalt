@@ -36,25 +36,24 @@ not a SQLite-compatible replacement or a hosted database.
 
 ## Installation
 
-Rust 1.88 or newer is required.
+Rust 1.88 or newer is required for a Cargo install.
 
 ```bash
-cargo install --path . --locked
+cargo install basalt-db --locked
 ```
 
-The published package name is `basalt-db`; the installed command remains
-`basalt`.
+The published package is named `basalt-db`; the installed command remains
+`basalt`. To install the current checkout instead, use
+`cargo install --path . --locked`.
 
-Tagged releases also include checksummed installers and prebuilt binaries for
-Linux, macOS, and Windows. After the first release is published, a normal
-desktop install can use:
+Tagged releases include checksummed installers and prebuilt binaries for Linux,
+macOS, and Windows. See [GitHub Releases](https://github.com/joshiii-xyz/basalt/releases)
+for the currently available no-toolchain install, or use the installer when a
+release provides it:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joshiii-xyz/basalt/releases/latest/download/basalt-db-installer.sh | sh
 ```
-
-The Rust package is not published yet. When it is, the package install path
-will be `cargo install basalt-db --locked`.
 
 To run directly from a checkout:
 
@@ -182,8 +181,8 @@ and executes only after the host retries with an explicit approval. Legacy
 initialized hosts receive `elicitation/create`; hosts that do not advertise
 elicitation use the explicit `--allow-writes` startup policy.
 
-The release candidate carries the visible Cargo ownership marker required for
-the future MCP Registry listing:
+The release metadata carries the visible Cargo ownership marker used by the
+MCP Registry listing:
 
 - MCP Registry ownership marker: mcp-name: io.github.joshiii-xyz/basalt
 
@@ -246,7 +245,7 @@ calls.
 | src/cli.rs | Interactive and scripted command-line frontend |
 | src/workspace.rs | Local workspace lifecycle and data interchange |
 | src/mcp.rs | Stdio MCP server, agent tools, and schema resource |
-| server.json | MCP Registry metadata for the release candidate |
+| server.json | MCP Registry release metadata |
 | docs/sql.md | Supported SQL dialect and transaction semantics |
 | docs/benchmark-results.md | Recorded workflow benchmark snapshot |
 | docs/compatibility.md | File-format boundary and differential-test policy |

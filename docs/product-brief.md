@@ -183,8 +183,8 @@ The current repository already provides useful foundations:
 
 The current product still has blocking gaps:
 
-- It is installed from a checkout and has no published release artifact yet;
-  the checked-in `dist` configuration and release workflow now define the
+- The `basalt-db` crate is published, but no GitHub binary release exists yet;
+  the checked-in `dist` configuration and release workflow define the
   normal-user path for the first tagged release.
 - The package name is `basalt-db` because `basalt` is already present in the
   crates.io index for an unrelated project; the published library crate and
@@ -207,8 +207,8 @@ The current product still has blocking gaps:
   workspace plan lifecycle remain required.
 - The benchmark is an internal workload, not a comparable result against an
   incumbent.
-- No release has been published yet, so the normal-user install path is
-  defined but not externally verified from a clean machine.
+- No GitHub binary release has been published yet, so the no-toolchain install
+  path is defined but not externally verified from a clean machine.
 
 These gaps are not all equal. The first product release should fix the gaps
 that block the selected workflow, not attempt to make Basalt feature-complete
@@ -304,10 +304,10 @@ The switching release must be usable without Rust:
 
 The official registry currently documents multiple package types, including
 Cargo and MCPB, but it is still in preview and stores installation metadata
-rather than artifacts. Basalt's release candidate now carries a checked-in
-`server.json` and the visible Cargo ownership marker required for the planned
+rather than artifacts. Basalt carries a checked-in `server.json` and the
+visible Cargo ownership marker required for the planned
 `io.github.joshiii-xyz/basalt` listing. Basalt will publish that metadata only
-after `basalt-db` is on crates.io and the checksummed binary release exists.
+after the checksummed binary release exists.
 
 ## Finite implementation plan
 
@@ -344,15 +344,16 @@ an ingestion script or knowing the internal file layout.
   create recovery points; modern clients advertising form elicitation also
   receive a per-operation MRTR approval round before workspace imports,
   applies, and undos.
-- Milestone 5 remains open only for publication and external-user validation.
+- Milestone 5 remains open only for binary and Registry publication plus
+  external-user validation.
   Hosted release evidence is complete: the incumbent benchmark harness,
   recorded SQLite/DuckDB snapshot, and first full comparison run are complete;
   supported-subset differential checks, compatibility policy, parser and
   snapshot fuzz targets, bounded campaigns, package contents, release
   generation, dependency auditing, MSRV checking, and clean-binary smoke tests
   are implemented and verified locally; hosted CI also checks macOS and Windows
-  compilation and tests. No public release or adoption claim is made until a
-  release is actually published and exercised by external users.
+  compilation and tests. No complete public-release or adoption claim is made
+  until the binary release is published and exercised by external users.
 
 ### Milestone 3 — Reversible state
 

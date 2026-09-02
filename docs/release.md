@@ -64,9 +64,9 @@ permission override, so `allow-dirty = ["ci"]` is intentional; review that
 override and archive-verification step after regenerating the generated file.
 
 The package is named `basalt-db` to avoid an existing crates.io name conflict,
-but every archive contains a `basalt` executable. Do not describe a crates.io
-install or a prebuilt download as available until that artifact has actually
-been published.
+but every archive contains a `basalt` executable. The crate install is
+`cargo install basalt-db --locked`; describe a prebuilt download as available
+only after its GitHub release artifact has actually been published.
 
 The hosted CI gate checks the full suite on Ubuntu, checks the MSRV separately,
 and compiles and tests on macOS and Windows runners. The release workflow's
@@ -74,8 +74,8 @@ artifact matrix remains the source of truth for the published architectures.
 
 The MCP Registry is a separate metadata publication. Its current preview
 supports multiple package types, including Cargo and MCPB, but does not host
-the artifacts themselves. The release candidate contains `server.json` and a
-visible `mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The
+the artifacts themselves. The repository contains `server.json` and a visible
+`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The
 metadata verifier checks that both version fields match the Cargo package and
 that the package launches the `mcp` subcommand. Publish `server.json` only
 after the crates.io package and GitHub release are available; do not publish
@@ -90,8 +90,8 @@ the version tag to start the GitHub release workflow:
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-git tag -a v0.1.0 -m "Basalt v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "Basalt v0.1.1"
+git push origin v0.1.1
 ```
 
 After the tag workflow succeeds, inspect the GitHub Release assets and their

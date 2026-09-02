@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-09-02
+
 - Added checked-in MCP Registry metadata and a release check that keeps its
   Cargo package, version, launch argument, repository, and ownership marker
   synchronized without publishing anything automatically.
