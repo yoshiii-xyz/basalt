@@ -56,6 +56,9 @@ grep -Fq '"state_changed": true' <<<"$diff_output"
 "$basalt_binary" workspace export --format jsonl "$workspace" users "$exported" >/dev/null
 grep -Fq '{"id":1,"name":"Ada"}' "$exported"
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+python3 "$script_dir/mcp-smoke.py" "$basalt_binary" "$workspace"
+
 mcp_output=$(
     {
         printf '%s\n' \

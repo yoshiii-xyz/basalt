@@ -16,6 +16,8 @@
 .idea/
 .vscode/
 *.swp
+__pycache__/
+*.py[cod]
 coverage/
 *.profraw
 

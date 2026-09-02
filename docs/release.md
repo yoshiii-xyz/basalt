@@ -65,7 +65,8 @@ artifact matrix remains the source of truth for the published architectures.
    or use a published release installer.
 2. Run `bash scripts/smoke-test.sh /path/to/basalt` against the installed
    binary. It covers version output, workspace import/query, reversible
-   mutation, export, and read-only MCP discovery.
+   mutation, export, read-only MCP discovery, and a process-level writable MCP
+   import/preview/apply/diff/undo/export journey.
 3. Create a durable database with the CLI, query it in table/CSV/JSON-lines
    modes, close it, and query it again.
 4. Create a workspace, import a representative CSV or JSON Lines file,

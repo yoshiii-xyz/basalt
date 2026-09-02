@@ -208,6 +208,8 @@ calls.
 | benches/ | In-process engine throughput benchmark |
 | scripts/benchmark_workspace.py | Reproducible workflow comparison harness |
 | scripts/differential_sql.py | Supported-subset SQLite differential checks |
+| scripts/mcp-smoke.py | Installed-binary writable MCP smoke test |
+| scripts/smoke-test.sh | Installed-binary CLI and read-only MCP smoke test |
 | fuzz/ | Optional libFuzzer parser and snapshot targets |
 
 ## Development
