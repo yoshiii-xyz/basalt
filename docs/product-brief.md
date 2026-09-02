@@ -228,8 +228,10 @@ when it is missing; it never replaces an existing directory or manifest.
 ### Import and export
 
 The first release supports predictable import/export for CSV, JSON/JSONL, and
-Basalt SQL dumps. Row imports infer columns, report row counts after a
-successful atomic commit, and leave the workspace unchanged on failure.
+Basalt SQL dumps. Imports infer columns where needed, report row counts and a
+durable change identifier after a successful atomic commit, and leave the
+workspace unchanged on failure. The CLI and MCP paths both create a recovery
+point; MCP additionally applies its bounded-content and approval policy.
 Export is deterministic so a workspace can be inspected, backed up, or moved
 without a Basalt-specific opaque dependency.
 

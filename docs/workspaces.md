@@ -65,7 +65,11 @@ text. Empty CSV fields become `NULL` for inferred numeric/boolean columns and
 empty text for text columns. JSON accepts one object, an array of objects, or
 JSON Lines objects. Missing and `null` fields become `NULL`; nested JSON is
 stored as compact text. Inputs are limited to 64 MiB and row imports are
-atomic.
+atomic. Every successful import also creates a recoverable history entry and
+returns a `change_id`; use `workspace history`, `workspace diff`, and
+`workspace undo` to inspect or reverse the latest import. This applies to both
+row-oriented imports and SQL dumps. A failed import leaves no partial data and
+is recorded as a failed operation for diagnostics.
 
 Imported tables have no inferred primary keys or other constraints. Add those
 with SQL after inspecting the imported data.
@@ -143,8 +147,8 @@ output file.
 
 Automation can add `--json` to import and export commands to receive one
 machine-readable metadata object on stdout. Import reports the source, format,
-table, byte count, and import summary. Export reports the destination, format,
-row count, and byte count after the file is installed:
+table, byte count, durable change ID, and import summary. Export reports the
+destination, format, row count, and byte count after the file is installed:
 
 ```bash
 basalt workspace import --json --table issues .basalt-workspace issues.csv
@@ -160,8 +164,9 @@ The workspace foundation provides `init`, `inspect`, read-only `query`,
 `preview`, `plan`, `apply`, `history`, `diff`, `undo`, `import`, and `export`. The same
 ingest-to-undo lifecycle is available through `basalt mcp --workspace PATH`;
 MCP imports accept bounded CSV, JSON, or JSON Lines content and require
-`--allow-writes`. They create a recovery point and return a change ID, while
-SQL dump imports remain CLI-only. MCP writes return bounded structured results.
+`--allow-writes`. Both CLI and MCP imports create a recovery point and return a
+change ID; SQL dump imports remain CLI-only. MCP writes return bounded
+structured results.
 The reversible lifecycle is local and single-process. See
 [the MCP contract](mcp.md) for the agent-facing sequence and approval boundary.
 

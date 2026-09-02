@@ -297,7 +297,7 @@ It does not claim keyed row pairing or a row-by-row patch; an update normally
 appears as one removed row and one added row. History and diff may reconcile an
 interrupted operation's metadata, but they do not apply data changes and do not
 require `--allow-writes`. History includes import format, table, byte count,
-and summary when the record came from `workspace_import`; `workspace_plan`
+and summary for every workspace import; `workspace_plan`
 reloads the exact persisted SQL and preview impact by plan ID.
 
 The import, apply, and undo calls are retry-safe for lost responses. Their
@@ -317,8 +317,8 @@ imports. An exact retry after a lost response returns the original import
 receipt while the workspace remains at the recorded result; it never imports
 the table twice. Use `workspace_undo` to reverse it while it is the latest
 committed change. SQL dump imports remain a CLI-only operation because they can
-contain arbitrary DDL and DML; use the preview/apply lifecycle for SQL changes
-through MCP.
+contain arbitrary DDL and DML; the CLI records their recovery point as well.
+Use the preview/apply lifecycle for SQL changes through MCP.
 
 In direct database mode, all SQL tools operate on one connection for the
 lifetime of the MCP process. When `--allow-writes` is enabled, transactions can

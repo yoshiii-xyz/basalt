@@ -182,6 +182,15 @@ fn machine_readable_import_and_export_reports_are_unambiguous() {
     assert_eq!(imported["table"], "events");
     assert_eq!(imported["bytes"], source_bytes.len());
     assert_eq!(imported["summary"], "table events (1 rows, 2 columns)");
+    assert!(imported["change_id"].as_str().is_some());
+
+    let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
+    assert!(history.status.success(), "history failed: {history:?}");
+    let history: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["status"], "committed");
+    assert_eq!(history[0]["import"]["format"], "csv");
+    assert_eq!(history[0]["import"]["table"], "events");
 
     let exported = run(&[
         "workspace",
@@ -365,6 +374,84 @@ fn failed_sql_import_does_not_leave_a_partial_table() {
         path_arg(&source),
     ]);
     assert!(!output.status.success());
+    assert!(inspect(&workspace)["tables"].as_array().unwrap().is_empty());
+    let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
+    assert!(history.status.success(), "history failed: {history:?}");
+    let history: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["status"], "failed");
+    assert_eq!(history[0]["import"]["format"], "sql");
+}
+
+#[test]
+fn cli_imports_are_recoverable_for_row_data_and_sql_dumps() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let csv_source = temp.path().join("users.csv");
+    let sql_source = temp.path().join("events.sql");
+    fs::write(&csv_source, "id,name\n1,Ada\n").unwrap();
+    fs::write(
+        &sql_source,
+        "CREATE TABLE events (id INTEGER); INSERT INTO events VALUES (1);",
+    )
+    .unwrap();
+    assert!(
+        run(&["workspace", "init", path_arg(&workspace)])
+            .status
+            .success()
+    );
+
+    let csv_import = run(&[
+        "workspace",
+        "import",
+        "--json",
+        "--table",
+        "users",
+        path_arg(&workspace),
+        path_arg(&csv_source),
+    ]);
+    assert!(
+        csv_import.status.success(),
+        "CSV import failed: {csv_import:?}"
+    );
+    let csv_import: Value = serde_json::from_slice(&csv_import.stdout).unwrap();
+    let csv_change_id = csv_import["change_id"].as_str().unwrap();
+    let csv_undo = run(&[
+        "workspace",
+        "undo",
+        "--json",
+        path_arg(&workspace),
+        csv_change_id,
+    ]);
+    assert!(csv_undo.status.success(), "CSV undo failed: {csv_undo:?}");
+    assert!(inspect(&workspace)["tables"].as_array().unwrap().is_empty());
+
+    let sql_import = run(&[
+        "workspace",
+        "import",
+        "--json",
+        path_arg(&workspace),
+        path_arg(&sql_source),
+    ]);
+    assert!(
+        sql_import.status.success(),
+        "SQL import failed: {sql_import:?}"
+    );
+    let sql_import: Value = serde_json::from_slice(&sql_import.stdout).unwrap();
+    assert!(sql_import["table"].is_null());
+    assert_eq!(sql_import["summary"], "2 statements from SQL");
+    let sql_change_id = sql_import["change_id"].as_str().unwrap();
+    assert!(
+        run(&[
+            "workspace",
+            "undo",
+            "--json",
+            path_arg(&workspace),
+            sql_change_id,
+        ])
+        .status
+        .success()
+    );
     assert!(inspect(&workspace)["tables"].as_array().unwrap().is_empty());
 }
 
@@ -660,8 +747,13 @@ fn interrupted_apply_and_undo_are_reconciled_after_restart() {
     let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
     assert!(history.status.success(), "history failed: {history:?}");
     let history: Value = serde_json::from_slice(&history.stdout).unwrap();
-    assert_eq!(history[0]["status"], "recovered");
-    let change_id = history[0]["change_id"].as_str().unwrap();
+    let recovered_apply = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "apply" && entry["status"] == "recovered")
+        .expect("crashed apply should be recovered");
+    let change_id = recovered_apply["change_id"].as_str().unwrap();
 
     let crashed_undo = run_with_env(
         &[
@@ -674,8 +766,13 @@ fn interrupted_apply_and_undo_are_reconciled_after_restart() {
     assert!(!crashed_undo.status.success());
     let history = run(&["workspace", "history", "--json", path_arg(&workspace)]);
     let history: Value = serde_json::from_slice(&history.stdout).unwrap();
-    assert_eq!(history[1]["kind"], "undo");
-    assert_eq!(history[1]["status"], "recovered");
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "undo" && entry["status"] == "recovered")
+    );
     let query = run(&[
         "workspace",
         "query",

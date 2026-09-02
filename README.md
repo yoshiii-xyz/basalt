@@ -102,11 +102,10 @@ basalt workspace query --json .basalt-workspace "SELECT * FROM issues ORDER BY i
 basalt workspace export .basalt-workspace issues issues.jsonl
 ```
 
-Imports are atomic and exports are deterministic. Add `--json` to workspace
-import/export commands when an agent or script needs a machine-readable
-operation report; raw exports to `-` remain clean data streams. Workspace MCP
-imports create recoverable workspace changes; CLI imports remain the direct
-local ingestion path. Later writes can be previewed, applied by exact plan ID,
+Imports are atomic, recoverable, and return a durable `change_id`; exports are
+deterministic. Add `--json` to workspace import/export commands when an agent or
+script needs a machine-readable operation report; raw exports to `-` remain
+clean data streams. Later writes can be previewed, applied by exact plan ID,
 inspected in history, diffed with schema and row-change counts, and undone when
 they are the latest change. A workspace is owned by one Basalt process while
 open, so stop a

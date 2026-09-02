@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Made CLI workspace imports share the durable recovery ledger with MCP imports;
+  CSV, JSON, JSON Lines, and SQL dump imports now return a change ID and can be
+  inspected or undone as the latest workspace change.
 - Workspace MCP writes now request per-operation user approval through the
   modern MCP multi-round-trip input flow when the connected client advertises
   form elicitation; legacy initialized clients retain elicitation/create and

@@ -533,60 +533,36 @@ pub fn run<R: Read, W: Write>(
                     )
                 })?;
             let bytes = read_source(&source, input)?;
-            let database = workspace.database()?;
             let table_name = if format == DataFormat::Sql {
                 None
             } else {
                 table.or_else(|| inferred_table_name(&source))
             };
-            let imported = match format {
-                DataFormat::Csv => import_csv(
-                    &database,
-                    table_name.as_deref(),
-                    &bytes,
-                    ImportLimits::unbounded(),
-                )?,
-                DataFormat::Json => import_json(
-                    &database,
-                    table_name.as_deref(),
-                    &bytes,
-                    ImportLimits::unbounded(),
-                )?,
-                DataFormat::JsonLines => import_json_lines(
-                    &database,
-                    table_name.as_deref(),
-                    &bytes,
-                    ImportLimits::unbounded(),
-                )?,
-                DataFormat::Sql => {
-                    if table_name.is_some() {
-                        return Err(WorkspaceError::Usage(
-                            "--table is not valid for SQL imports".to_string(),
-                        ));
-                    }
-                    import_sql(&database, &bytes)?
-                }
-            };
+            let imported = import_with_recovery(
+                &workspace,
+                table_name.as_deref(),
+                format,
+                &bytes,
+                ImportLimits::unbounded(),
+            )?;
             if json {
                 let report = CliImportReport {
                     operation: "import",
                     workspace: workspace.root.display().to_string(),
                     source: source.display().to_string(),
-                    format: format.name().to_string(),
-                    table: table_name,
+                    format: imported.format.clone(),
+                    table: imported.table.clone(),
                     bytes: bytes.len(),
-                    summary: imported,
+                    change_id: imported.change_id.clone(),
+                    summary: imported.summary.clone(),
                 };
                 serde_json::to_writer_pretty(&mut *output, &report)?;
                 output.write_all(b"\n")?;
             } else {
                 writeln!(
                     output,
-                    "imported {}{}",
-                    format.name(),
-                    imported
-                        .map(|summary| format!(": {summary}"))
-                        .unwrap_or_default()
+                    "imported {}: {} (change {})",
+                    imported.format, imported.summary, imported.change_id
                 )?;
             }
         }
@@ -1062,7 +1038,8 @@ struct CliImportReport {
     format: String,
     table: Option<String>,
     bytes: usize,
-    summary: Option<String>,
+    change_id: String,
+    summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1258,7 +1235,7 @@ fn enforce_import_limits(
     Ok(())
 }
 
-fn import_sql(database: &Database, bytes: &[u8]) -> Result<Option<String>, WorkspaceError> {
+fn parse_sql_import(bytes: &[u8]) -> Result<(&str, Vec<Statement>), WorkspaceError> {
     let sql = std::str::from_utf8(bytes)
         .map_err(|error| WorkspaceError::Invalid(format!("SQL input is not UTF-8: {error}")))?;
     let statements = parse(sql).map_err(|error| {
@@ -1277,6 +1254,11 @@ fn import_sql(database: &Database, bytes: &[u8]) -> Result<Option<String>, Works
             "SQL imports must not contain BEGIN, COMMIT, ROLLBACK, or CHECKPOINT".to_string(),
         ));
     }
+    Ok((sql, statements))
+}
+
+fn import_sql(database: &Database, bytes: &[u8]) -> Result<Option<String>, WorkspaceError> {
+    let (sql, _statements) = parse_sql_import(bytes)?;
 
     let mut connection = database.connect();
     connection.execute_sql("BEGIN")?;
@@ -1401,7 +1383,8 @@ impl From<&PlanRecord> for PlanReport {
 struct ImportMetadata {
     request_key: String,
     format: String,
-    table: String,
+    #[serde(default)]
+    table: Option<String>,
     bytes: usize,
     summary: String,
 }
@@ -1454,7 +1437,7 @@ pub(crate) struct HistoryEntry {
 #[derive(Debug, Serialize, JsonSchema)]
 struct HistoryImport {
     format: String,
-    table: String,
+    table: Option<String>,
     bytes: usize,
     summary: String,
 }
@@ -2644,46 +2627,47 @@ pub(crate) fn mcp_undo(
     undo(workspace, change_id)
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct ImportReport {
-    change_id: String,
-    format: String,
-    table: String,
-    bytes: usize,
-    summary: String,
-    base_state: String,
-    after_state: String,
-    generation: u64,
-}
-
-pub(crate) fn mcp_import(
+fn import_with_recovery(
     workspace: &Workspace,
-    table: Option<&str>,
-    format: &str,
-    content: &str,
+    requested_table: Option<&str>,
+    format: DataFormat,
+    bytes: &[u8],
+    limits: ImportLimits,
 ) -> Result<ImportReport, WorkspaceError> {
-    if content.len() > MAX_MCP_IMPORT_BYTES {
-        return Err(WorkspaceError::Invalid(format!(
-            "MCP import content exceeds the {} MiB limit",
-            MAX_MCP_IMPORT_BYTES / (1024 * 1024)
-        )));
-    }
-    let format = DataFormat::parse(format)?;
-    if format == DataFormat::Sql {
-        return Err(WorkspaceError::Usage(
-            "workspace_import accepts csv, json, or jsonl; use the CLI for SQL dump imports"
-                .to_string(),
-        ));
-    }
-    let table = required_mcp_table(table)?;
-    let bytes = content.as_bytes();
-
-    // Parse and type-check before touching the durable workspace. This keeps a
-    // malformed agent payload from creating a failed history record.
-    let validated_summary = validate_mcp_import(format, table, bytes, ImportLimits::mcp())?;
+    let table = match format {
+        DataFormat::Sql => {
+            if requested_table.is_some() {
+                return Err(WorkspaceError::Usage(
+                    "--table is not valid for SQL imports".to_string(),
+                ));
+            }
+            None
+        }
+        DataFormat::Csv | DataFormat::Json | DataFormat::JsonLines => {
+            Some(required_table(requested_table)?.to_string())
+        }
+    };
+    let table_name = table.as_deref();
+    let validated_summary = match format {
+        DataFormat::Csv | DataFormat::Json | DataFormat::JsonLines => validate_import(
+            format,
+            table_name.ok_or_else(|| {
+                WorkspaceError::Invalid("row import is missing its table name".to_string())
+            })?,
+            bytes,
+            limits,
+        )?,
+        DataFormat::Sql => {
+            let (_, statements) = parse_sql_import(bytes)?;
+            format!("{} statements from SQL", statements.len())
+        }
+    };
 
     let database = workspace.database()?;
-    let mut preflight_budget = ExecutionBudget::bounded(MCP_EXECUTION_WORK_LIMIT);
+    let mut preflight_budget = limits
+        .max_work
+        .map(ExecutionBudget::bounded)
+        .unwrap_or_else(ExecutionBudget::unlimited);
     database.checkpoint_with_budget(&mut preflight_budget)?;
     let base_state = state_fingerprint(&workspace.database_path())?;
     let base_generation = database.generation();
@@ -2691,7 +2675,8 @@ pub(crate) fn mcp_import(
     let mut changes = load_changes(workspace)?;
     reconcile_changes(workspace, &mut changes, &base_state, base_generation)?;
 
-    let request_key = import_request_key(format, table, bytes);
+    let request_table = table_name.unwrap_or("");
+    let request_key = import_request_key(format, request_table, bytes);
     if let Some(existing) = changes.iter().rev().find(|change| {
         change
             .import
@@ -2726,7 +2711,7 @@ pub(crate) fn mcp_import(
         });
     }
 
-    let change_id = import_change_id(&base_state, format, table, bytes);
+    let change_id = import_change_id(&base_state, format, request_table, bytes);
     let retry_sequence = if let Some(existing) =
         changes.iter().find(|change| change.change_id == change_id)
     {
@@ -2746,7 +2731,7 @@ pub(crate) fn mcp_import(
             Some(existing.sequence)
         } else {
             return Err(WorkspaceError::Invalid(format!(
-                "import already has a history record with status {:?}; inspect workspace_history before retrying",
+                "import already has a history record with status {:?}; inspect workspace history before retrying",
                 existing.status
             )));
         }
@@ -2788,7 +2773,7 @@ pub(crate) fn mcp_import(
         import: Some(ImportMetadata {
             request_key,
             format: format.name().to_string(),
-            table: table.to_string(),
+            table: table.clone(),
             bytes: bytes.len(),
             summary: validated_summary,
         }),
@@ -2800,12 +2785,10 @@ pub(crate) fn mcp_import(
     }
 
     let imported = match format {
-        DataFormat::Csv => import_csv(&database, Some(table), bytes, ImportLimits::mcp()),
-        DataFormat::Json => import_json(&database, Some(table), bytes, ImportLimits::mcp()),
-        DataFormat::JsonLines => {
-            import_json_lines(&database, Some(table), bytes, ImportLimits::mcp())
-        }
-        DataFormat::Sql => unreachable!(),
+        DataFormat::Csv => import_csv(&database, table_name, bytes, limits),
+        DataFormat::Json => import_json(&database, table_name, bytes, limits),
+        DataFormat::JsonLines => import_json_lines(&database, table_name, bytes, limits),
+        DataFormat::Sql => import_sql(&database, bytes),
     };
     let summary = match imported {
         Ok(summary) => summary.unwrap_or_else(|| "import completed".to_string()),
@@ -2816,10 +2799,10 @@ pub(crate) fn mcp_import(
             return Err(error);
         }
     };
+    if let Some(import) = change.import.as_mut() {
+        import.summary = summary.clone();
+    }
 
-    // The bounded import transaction has already charged the resulting state
-    // before publishing it. This checkpoint canonicalizes that bounded state
-    // for the recovery record.
     if let Err(error) = database.checkpoint() {
         change.status = ChangeStatus::Unresolved;
         change.error = Some(format!("import committed but checkpoint failed: {error}"));
@@ -2839,13 +2822,54 @@ pub(crate) fn mcp_import(
     Ok(ImportReport {
         change_id,
         format: format.name().to_string(),
-        table: table.to_string(),
+        table,
         bytes: bytes.len(),
         summary,
         base_state,
         after_state,
         generation,
     })
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ImportReport {
+    change_id: String,
+    format: String,
+    table: Option<String>,
+    bytes: usize,
+    summary: String,
+    base_state: String,
+    after_state: String,
+    generation: u64,
+}
+
+pub(crate) fn mcp_import(
+    workspace: &Workspace,
+    table: Option<&str>,
+    format: &str,
+    content: &str,
+) -> Result<ImportReport, WorkspaceError> {
+    if content.len() > MAX_MCP_IMPORT_BYTES {
+        return Err(WorkspaceError::Invalid(format!(
+            "MCP import content exceeds the {} MiB limit",
+            MAX_MCP_IMPORT_BYTES / (1024 * 1024)
+        )));
+    }
+    let format = DataFormat::parse(format)?;
+    if format == DataFormat::Sql {
+        return Err(WorkspaceError::Usage(
+            "workspace_import accepts csv, json, or jsonl; use the CLI for SQL dump imports"
+                .to_string(),
+        ));
+    }
+    let table = required_mcp_table(table)?;
+    import_with_recovery(
+        workspace,
+        Some(table),
+        format,
+        content.as_bytes(),
+        ImportLimits::mcp(),
+    )
 }
 
 fn required_mcp_table(table: Option<&str>) -> Result<&str, WorkspaceError> {
@@ -2856,7 +2880,7 @@ fn required_mcp_table(table: Option<&str>) -> Result<&str, WorkspaceError> {
     Ok(table)
 }
 
-fn validate_mcp_import(
+fn validate_import(
     format: DataFormat,
     table: &str,
     bytes: &[u8],
@@ -4057,7 +4081,7 @@ mod tests {
         .unwrap();
         let request_key = import_request_key(format, table, content.as_bytes());
         let summary =
-            validate_mcp_import(format, table, content.as_bytes(), ImportLimits::mcp()).unwrap();
+            validate_import(format, table, content.as_bytes(), ImportLimits::mcp()).unwrap();
         let failed = ChangeRecord {
             format_version: FORMAT_VERSION,
             sequence: 1,
@@ -4077,7 +4101,7 @@ mod tests {
             import: Some(ImportMetadata {
                 request_key,
                 format: format.name().to_string(),
-                table: table.to_string(),
+                table: Some(table.to_string()),
                 bytes: content.len(),
                 summary,
             }),
