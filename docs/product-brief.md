@@ -141,7 +141,7 @@ once:
 - a cheap undo path; and
 - an MCP and CLI surface that expose the same semantics.
 
-### Current upstream issue signal (rechecked 2026-09-01)
+### Current upstream issue signal (rechecked 2026-09-02)
 
 These are open issue reports, not defect rates, security audits, or adoption
 metrics. They are useful evidence about the problems adjacent tools are being
