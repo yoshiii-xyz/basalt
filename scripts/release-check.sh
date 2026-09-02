@@ -35,7 +35,7 @@ run_check cargo check --all-targets --locked
 run_check cargo clippy --all-targets --all-features --locked -- -D warnings
 run_check cargo test --all-targets --locked
 run_check env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --locked
-run_check cargo package --locked
+run_check cargo publish --dry-run --locked
 run_check cargo build --release --locked
 run_check bash scripts/smoke-test.sh target/release/basalt
 run_check python3 scripts/differential_sql.py --basalt target/release/basalt
@@ -43,12 +43,9 @@ run_check python3 scripts/differential_sql.py --basalt target/release/basalt
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/basalt-release-check.XXXXXX")
 trap 'rm -rf -- "$temp_root"' EXIT
 
-readarray -t package_metadata < <(
-    cargo metadata --no-deps --format-version 1 \
-        | python3 -c 'import json, sys; p = json.load(sys.stdin)["packages"][0]; print(p["name"]); print(p["version"])'
-)
-package_name=${package_metadata[0]}
-package_version=${package_metadata[1]}
+package_metadata=$(cargo metadata --no-deps --format-version 1 \
+    | python3 -c 'import json, sys; p = json.load(sys.stdin)["packages"][0]; print(p["name"] + "\t" + str(p["version"]))')
+IFS=$'\t' read -r package_name package_version <<<"$package_metadata"
 package_file="target/package/${package_name}-${package_version}.crate"
 package_dir="$temp_root/${package_name}-${package_version}"
 install_root="$temp_root/install"
