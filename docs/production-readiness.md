@@ -34,6 +34,7 @@ features outside the documented CLI/MCP workflow.
 | MCP boundary | Stdio carries only newline-delimited JSON-RPC on stdout. Workspace mode does not expose unrestricted `execute`; writes require startup permission and protocol-appropriate approval. Tool results are typed and bounded. | `src/mcp.rs`, `scripts/mcp-smoke.py`; legacy and modern wire tests. |
 | Deterministic interfaces | CLI JSON output is JSON Lines per statement; workspace reports have stable identifiers and explicit errors; exports are deterministic; MCP exposes typed result schemas and bounded row responses. | CLI/workspace/MCP integration tests and smoke scripts. |
 | Distribution | The package, binary, registry metadata, release archives, checksums, installers, MSRV, portability checks, and clean-consumer smoke path are validated by the release workflow. | `.github/workflows/`, `dist-workspace.toml`, `scripts/release-check.sh`, `docs/release.md`. |
+| Public repository hygiene | CI and release checks reject tracked build products, local data, temporary files, and high-confidence credential patterns before they can enter the public tree or release path. | `scripts/public-repo-check.py`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`. |
 
 ## Fixed resource limits
 
@@ -97,13 +98,16 @@ cargo publish --dry-run --locked
 cargo build --release --locked
 bash scripts/smoke-test.sh target/release/basalt
 python3 scripts/differential_sql.py --basalt target/release/basalt
+python3 scripts/public-repo-check.py
 cargo audit
 ```
 
 `bash scripts/release-check.sh` runs the applicable local release checks,
 installs the exact packaged crate into an isolated prefix, and repeats the
 installed-binary smoke journey. Hosted CI is required for the MSRV, macOS,
-Windows, release-archive, and hosted-security portions.
+Windows, release-archive, native installer, CodeQL, dependency-review, and
+hosted-security portions. GitHub secret scanning and push protection are also
+enabled for the public repository.
 
 Fuzzing, automated integration tests, and AI-agent testing are technical
 evidence only. They are not human-user validation, usability research, or an

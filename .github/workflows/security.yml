@@ -6,12 +6,18 @@ on:
     paths:
       - Cargo.toml
       - Cargo.lock
-      - .github/workflows/security.yml
+      - fuzz/Cargo.toml
+      - fuzz/Cargo.lock
+      - .github/dependabot.yml
+      - .github/workflows/**
   pull_request:
     paths:
       - Cargo.toml
       - Cargo.lock
-      - .github/workflows/security.yml
+      - fuzz/Cargo.toml
+      - fuzz/Cargo.lock
+      - .github/dependabot.yml
+      - .github/workflows/**
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -35,3 +41,19 @@ jobs:
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5

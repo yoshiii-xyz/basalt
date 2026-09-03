@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5: 2026-09-02
+
+- Added pinned CodeQL analysis for Rust and dependency review for dependency
+  changes in pull requests.
+- Added weekly Dependabot updates for Cargo packages, fuzz dependencies, and
+  GitHub Actions.
+- Added a repository hygiene gate that rejects accidental local artifacts and
+  high-confidence credential patterns before CI and release packaging.
+- Added hosted native installer smoke coverage for Ubuntu, macOS, and Windows
+  release consumers.
+
 ## 0.1.4: 2026-09-02
 
 - Kept the MCP stdio stream alive after malformed JSON and invalid message

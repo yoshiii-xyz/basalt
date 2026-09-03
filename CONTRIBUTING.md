@@ -15,6 +15,7 @@ cargo check --all-targets --locked
 cargo test --all-targets --locked
 cargo doc --no-deps --locked
 cargo package --locked
+python3 scripts/public-repo-check.py
 ~~~
 
 For storage or query-planner changes, also run:
@@ -41,7 +42,8 @@ errors, and keep result sizes bounded so an agent cannot accidentally flood its
 context window.
 
 Please avoid committing generated files such as target/, local database
-files, editor settings, or benchmark output.
+files, editor settings, benchmark output, or credentials. The public repository
+check runs the same exclusions and high-confidence credential scan in CI.
 
 See [docs/release.md](docs/release.md) for the full release and smoke-test
 checklist.

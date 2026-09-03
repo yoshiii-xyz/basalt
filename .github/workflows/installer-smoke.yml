@@ -1,0 +1,104 @@
+name: Installer smoke
+
+on:
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to test
+        required: true
+        default: v0.1.5
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success')
+    name: Unix installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
+          persist-credentials: false
+
+      - name: Install published shell artifact
+        shell: bash
+        env:
+          CARGO_HOME: ${{ runner.temp }}/basalt-cargo
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME"
+          installer="$RUNNER_TEMP/basalt-db-installer.sh"
+          curl --fail --silent --show-error --location \
+            "https://github.com/joshiii-xyz/basalt/releases/download/${RELEASE_TAG}/basalt-db-installer.sh" \
+            --output "$installer"
+          chmod 700 "$installer"
+          BASALT_DB_NO_MODIFY_PATH=1 BASALT_DB_DISABLE_UPDATE=1 "$installer"
+          binary="$CARGO_HOME/bin/basalt"
+          test -x "$binary"
+          test "$("$binary" --version)" = "basalt ${RELEASE_TAG#v}"
+          bash scripts/smoke-test.sh "$binary"
+
+  windows:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success')
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
+          persist-credentials: false
+
+      - name: Install published PowerShell artifact
+        shell: pwsh
+        env:
+          CARGO_HOME: ${{ runner.temp }}\basalt-cargo
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
+          $installer = Join-Path $env:RUNNER_TEMP "basalt-db-installer.ps1"
+          Invoke-WebRequest `
+            -Uri "https://github.com/joshiii-xyz/basalt/releases/download/$env:RELEASE_TAG/basalt-db-installer.ps1" `
+            -OutFile $installer
+          $env:BASALT_DB_NO_MODIFY_PATH = "1"
+          $env:BASALT_DB_DISABLE_UPDATE = "1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "PowerShell installer failed with exit code $LASTEXITCODE"
+          }
+          $binary = Join-Path $env:CARGO_HOME "bin\basalt.exe"
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "installed binary was not found at $binary"
+          }
+          $expectedVersion = "basalt " + $env:RELEASE_TAG.TrimStart("v")
+          if ((& $binary --version) -ne $expectedVersion) {
+            throw "installed binary reported an unexpected version"
+          }
+          $workspace = Join-Path $env:RUNNER_TEMP "basalt-workspace"
+          & $binary init $workspace
+          & python scripts/mcp-smoke.py $binary $workspace

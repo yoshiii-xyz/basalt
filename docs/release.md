@@ -16,6 +16,7 @@ cargo test --all-targets --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo package --locked
 cargo build --release --locked
+python3 scripts/public-repo-check.py
 bash scripts/smoke-test.sh target/release/basalt
 python3 scripts/benchmark_workspace.py --basalt target/release/basalt \
   --rows 10000 --repeats 3 > benchmark.json
@@ -51,6 +52,13 @@ python3 scripts/benchmark_workspace.py --basalt target/release/basalt \
 Dependency audit tools are optional local/CI additions. If `cargo audit` or a
 similar tool is available, run it and record the result in the release notes;
 do not claim an audit was performed when the tool was unavailable.
+
+Hosted security automation runs RustSec audit checks, CodeQL for Rust, and
+dependency review on dependency-changing pull requests. Dependabot monitors
+the root Cargo package, the fuzz package, and GitHub Actions weekly. The
+repository hygiene check rejects tracked build products, local databases,
+temporary files, and high-confidence credential patterns before CI or release
+work proceeds.
 
 ## Distribution
 
@@ -107,7 +115,7 @@ publication.
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-VERSION=0.1.4
+VERSION=0.1.5
 git tag -a "v${VERSION}" -m "Basalt v${VERSION}"
 git push origin "v${VERSION}"
 ```
@@ -116,6 +124,12 @@ After the tag workflow succeeds, inspect the GitHub Release assets and their
 checksums, then run the installer and `scripts/smoke-test.sh` from an isolated
 consumer environment or clean machine. Do not describe an artifact as
 available until those checks pass.
+
+The `Installer smoke` workflow also runs automatically for a published
+release. It installs the shell artifact on Ubuntu and macOS, installs the
+PowerShell artifact on Windows, checks the version, and exercises the CLI and
+MCP smoke path on each native runner. Dispatch it manually with a release tag
+when rerunning the check for an existing release.
 
 Once the package and binary release are verified, install the official
 `mcp-publisher` CLI, create or update `server.json` with the same server name
