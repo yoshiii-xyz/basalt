@@ -115,7 +115,7 @@ publication.
 ```bash
 cargo publish --dry-run --locked
 cargo publish --locked
-VERSION=0.1.5
+VERSION=0.1.6
 git tag -a "v${VERSION}" -m "Basalt v${VERSION}"
 git push origin "v${VERSION}"
 ```

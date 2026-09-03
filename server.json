@@ -8,14 +8,14 @@
     "source": "github",
     "id": "1353090737"
   },
-  "version": "0.1.5",
+  "version": "0.1.6",
   "websiteUrl": "https://github.com/joshiii-xyz/basalt",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "basalt-db",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "transport": {
         "type": "stdio"
       },

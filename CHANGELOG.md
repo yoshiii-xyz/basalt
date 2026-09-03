@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6: 2026-09-03
+
+- Updated the direct `sha2` dependency to 0.11.0 and kept MCP write approval
+  identities stable with explicit digest-byte encoding.
+- Updated pinned GitHub Actions checkout steps to v7.0.1 and synchronized the
+  cargo-dist source configuration.
+
 ## 0.1.5: 2026-09-02
 
 - Added pinned CodeQL analysis for Rust and dependency review for dependency

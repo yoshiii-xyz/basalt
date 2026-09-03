@@ -1569,7 +1569,11 @@ fn write_operation_identity(operation: WriteOperation, parts: &[&str]) -> String
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn complete_json<T: Serialize>(value: T) -> Result<CallToolResponse, String> {
@@ -1898,6 +1902,14 @@ mod tests {
     fn mcp_rejects_mutating_query() {
         let error = validate_sql("DELETE FROM users", true).unwrap_err();
         assert!(error.contains("SELECT"));
+    }
+
+    #[test]
+    fn mcp_write_operation_identity_is_stable() {
+        assert_eq!(
+            write_operation_identity(WriteOperation::Apply, &["plan-123"]),
+            "3c2c8d418c345803f69373bd26f1a8d76e892fd8b204d77dbbaafcbb2e4bb517"
+        );
     }
 
     #[test]
