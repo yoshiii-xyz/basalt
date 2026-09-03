@@ -1,6 +1,6 @@
 [package]
 name = "basalt-db"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
 description = "CLI-first local SQL workspaces for structured data and coding agents"
@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/joshiii-xyz/basalt"
 keywords = ["agents", "cli", "mcp", "sql", "workspace"]
 categories = ["database-implementations", "command-line-utilities"]
-exclude = [".github/", "dist-workspace.toml"]
+exclude = [".github/", "dist-workspace.toml", "qa/"]
 
 [lib]
 name = "basalt"

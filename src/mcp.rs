@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use rmcp::handler::server::{
     router::tool::ToolRouter,
     tool::{InputResponses as ToolInputResponses, RequestState as ToolRequestState},
@@ -30,9 +30,11 @@ use rmcp::{
     ErrorData, Json, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::bytes::BytesMut;
+use tokio_util::codec::{Decoder, FramedWrite};
 use uuid::Uuid;
 
 use crate::database::{Connection, Database};
@@ -294,24 +296,96 @@ type StdioWriter =
     FramedWrite<tokio::io::Stdout, JsonRpcMessageCodec<TxJsonRpcMessage<RoleServer>>>;
 type SharedStdioWriter = Arc<tokio::sync::Mutex<Option<StdioWriter>>>;
 
+/// Keep syntax errors recoverable after rmcp's decoder has consumed their frame.
+/// The transport handles decoder errors after each frame so syntax and incomplete-JSON
+/// errors can be ignored without ending the input stream.
+struct RecoveringJsonRpcMessageCodec<T> {
+    inner: JsonRpcMessageCodec<T>,
+}
+
+impl<T> RecoveringJsonRpcMessageCodec<T> {
+    fn new_with_max_length(max_length: usize) -> Self {
+        Self {
+            inner: JsonRpcMessageCodec::new_with_max_length(max_length),
+        }
+    }
+}
+
+impl<T: DeserializeOwned> Decoder for RecoveringJsonRpcMessageCodec<T> {
+    type Item = T;
+    type Error = JsonRpcMessageCodecError;
+
+    fn decode(&mut self, buffer: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.inner.decode(buffer) {
+            Err(JsonRpcMessageCodecError::Serde(error))
+                if matches!(
+                    error.classify(),
+                    serde_json::error::Category::Syntax | serde_json::error::Category::Eof
+                ) =>
+            {
+                tracing::debug!("ignoring unparsable MCP input: {error}");
+                Ok(None)
+            }
+            result => result,
+        }
+    }
+}
+
 struct BoundedStdioTransport {
-    read: FramedRead<tokio::io::Stdin, JsonRpcMessageCodec<RxJsonRpcMessage<RoleServer>>>,
+    read: BufReader<tokio::io::Stdin>,
+    decoder: RecoveringJsonRpcMessageCodec<RxJsonRpcMessage<RoleServer>>,
+    line_buf: Vec<u8>,
     write: SharedStdioWriter,
 }
 
 impl BoundedStdioTransport {
     fn new() -> Self {
-        let read = FramedRead::new(
-            tokio::io::stdin(),
-            JsonRpcMessageCodec::new_with_max_length(MAX_MCP_MESSAGE_BYTES),
-        );
         let write = FramedWrite::new(
             tokio::io::stdout(),
             JsonRpcMessageCodec::new_with_max_length(MAX_MCP_MESSAGE_BYTES),
         );
         Self {
-            read,
+            read: BufReader::new(tokio::io::stdin()),
+            decoder: RecoveringJsonRpcMessageCodec::new_with_max_length(MAX_MCP_MESSAGE_BYTES),
+            line_buf: Vec::new(),
             write: Arc::new(tokio::sync::Mutex::new(Some(write))),
+        }
+    }
+
+    async fn read_frame(&mut self) -> Result<Option<BytesMut>, std::io::Error> {
+        loop {
+            let available = self.read.fill_buf().await?;
+            if available.is_empty() {
+                if self.line_buf.is_empty() {
+                    return Ok(None);
+                }
+                let mut frame = BytesMut::from(self.line_buf.as_slice());
+                frame.extend_from_slice(b"\n");
+                self.line_buf.clear();
+                return Ok(Some(frame));
+            }
+
+            let newline_offset = available.iter().position(|byte| *byte == b'\n');
+            let bytes_to_consume = newline_offset.map_or(available.len(), |offset| offset + 1);
+            let frame_length = self.line_buf.len() + newline_offset.unwrap_or(bytes_to_consume);
+            if frame_length > MAX_MCP_MESSAGE_BYTES {
+                self.read.consume(bytes_to_consume);
+                self.line_buf.clear();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "MCP input message exceeds the 32 MiB limit",
+                ));
+            }
+
+            self.line_buf
+                .extend_from_slice(&available[..bytes_to_consume]);
+            self.read.consume(bytes_to_consume);
+
+            if newline_offset.is_some() {
+                let frame = BytesMut::from(self.line_buf.as_slice());
+                self.line_buf.clear();
+                return Ok(Some(frame));
+            }
         }
     }
 }
@@ -338,10 +412,18 @@ impl Transport<RoleServer> for BoundedStdioTransport {
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
         loop {
-            match self.read.next().await {
-                Some(Ok(message)) => return Some(message),
-                None => return None,
-                Some(Err(JsonRpcMessageCodecError::Serde(error))) => match error.classify() {
+            let mut frame = (match self.read_frame().await {
+                Ok(frame) => frame,
+                Err(error) => {
+                    tracing::error!("MCP stdio transport read failed: {error}");
+                    return None;
+                }
+            })?;
+
+            match self.decoder.decode(&mut frame) {
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => continue,
+                Err(JsonRpcMessageCodecError::Serde(error)) => match error.classify() {
                     serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
                         tracing::debug!("ignoring unparsable MCP input: {error}");
                     }
@@ -358,8 +440,8 @@ impl Transport<RoleServer> for BoundedStdioTransport {
                         }
                     }
                 },
-                Some(Err(error)) => {
-                    tracing::error!("MCP stdio transport read failed: {error}");
+                Err(error) => {
+                    tracing::error!("MCP stdio transport decode failed: {error}");
                     return None;
                 }
             }
@@ -1872,5 +1954,40 @@ mod tests {
             error,
             JsonRpcMessageCodecError::MaxLineLengthExceeded
         ));
+    }
+
+    #[test]
+    fn mcp_stdio_codec_recovers_after_malformed_json() {
+        let mut codec = RecoveringJsonRpcMessageCodec::<serde_json::Value>::new_with_max_length(
+            MAX_MCP_MESSAGE_BYTES,
+        );
+        let mut input = BytesMut::from(&b"{not-json}\n{\"ok\":true}\n"[..]);
+
+        assert!(Decoder::decode(&mut codec, &mut input).unwrap().is_none());
+        assert_eq!(
+            Decoder::decode(&mut codec, &mut input).unwrap(),
+            Some(serde_json::json!({"ok": true}))
+        );
+    }
+
+    #[test]
+    fn mcp_stdio_codec_recovers_after_invalid_message_shape() {
+        let mut codec =
+            RecoveringJsonRpcMessageCodec::<RxJsonRpcMessage<RoleServer>>::new_with_max_length(
+                MAX_MCP_MESSAGE_BYTES,
+            );
+        let mut input = BytesMut::from(
+            &br#"[]
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+"#[..],
+        );
+
+        let error = Decoder::decode(&mut codec, &mut input).unwrap_err();
+        assert!(matches!(
+            error,
+            JsonRpcMessageCodecError::Serde(error)
+                if matches!(error.classify(), serde_json::error::Category::Data)
+        ));
+        assert!(Decoder::decode(&mut codec, &mut input).unwrap().is_some());
     }
 }

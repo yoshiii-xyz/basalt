@@ -90,12 +90,23 @@ if command -v dist >/dev/null 2>&1; then
         exit 1
     fi
     if [[ "$host_target" == *windows* ]]; then
-        release_archive="$target_dir/distrib/basalt-db-${host_target}.zip"
+        archive_name="basalt-db-${host_target}.zip"
     else
-        release_archive="$target_dir/distrib/basalt-db-${host_target}.tar.xz"
+        archive_name="basalt-db-${host_target}.tar.xz"
     fi
     run_check dist build --target="$host_target" --artifacts=local --output-format=json \
         >"$temp_root/dist-build.json"
+    configured_archive="$target_dir/distrib/$archive_name"
+    checkout_archive="$repo_root/target/distrib/$archive_name"
+    if [[ -f "$configured_archive" ]]; then
+        release_archive="$configured_archive"
+    elif [[ -f "$checkout_archive" ]]; then
+        release_archive="$checkout_archive"
+    else
+        printf 'dist build did not produce the expected release archive: %s or %s\n' \
+            "$configured_archive" "$checkout_archive" >&2
+        exit 1
+    fi
     run_check python3 scripts/verify-release-artifacts.py "$release_archive"
 else
     printf '\n==> dist plan (skipped: dist is not installed)\n'

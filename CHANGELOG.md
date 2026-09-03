@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4: 2026-09-02
+
+- Kept the MCP stdio stream alive after malformed JSON and invalid message
+  shapes so later requests receive responses instead of stalling.
+- Made bounded MCP frame handling cancellation-safe, including a final frame
+  without a newline, while preserving the 32 MiB input limit.
+- Made release validation find cargo-dist output when Cargo uses a custom
+  target directory.
+- Excluded local end-to-end validation artifacts from the published crate.
+
 ## 0.1.3 — 2026-09-02
 
 - Corrected packaged release documentation so the published crate describes
