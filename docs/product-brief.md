@@ -307,7 +307,7 @@ The official registry currently documents multiple package types, including
 Cargo and MCPB, but it is still in preview and stores installation metadata
 rather than artifacts. Basalt carries a checked-in `server.json`, the visible
 Cargo ownership marker, and a published
-[`io.github.joshiii-xyz/basalt` listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
+[`io.github.yoshiii-xyz/basalt` listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.yoshiii-xyz%2Fbasalt).
 
 ## Finite implementation plan
 

@@ -1,15 +1,15 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.joshiii-xyz/basalt",
+  "name": "io.github.yoshiii-xyz/basalt",
   "title": "Basalt",
   "description": "Local SQL workspaces with bounded, recoverable writes for coding agents.",
   "repository": {
-    "url": "https://github.com/joshiii-xyz/basalt",
+    "url": "https://github.com/yoshiii-xyz/basalt",
     "source": "github",
     "id": "1353090737"
   },
   "version": "0.1.6",
-  "websiteUrl": "https://github.com/joshiii-xyz/basalt",
+  "websiteUrl": "https://github.com/yoshiii-xyz/basalt",
   "packages": [
     {
       "registryType": "cargo",

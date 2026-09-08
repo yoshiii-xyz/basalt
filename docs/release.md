@@ -90,8 +90,8 @@ artifact matrix remains the source of truth for the published architectures.
 The MCP Registry is a separate metadata publication. Its current preview
 supports multiple package types, including Cargo and MCPB, but does not host
 the artifacts themselves. The repository contains `server.json` and a visible
-`mcp-name: io.github.joshiii-xyz/basalt` marker in the README. The current
-metadata is published at the [Basalt Registry listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt).
+`mcp-name: io.github.yoshiii-xyz/basalt` marker in the README. The current
+metadata is published at the [Basalt Registry listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.yoshiii-xyz%2Fbasalt).
 The metadata verifier checks that both version fields match the Cargo package
 and that the package launches the `mcp` subcommand. Publish future metadata
 only after its corresponding crate and GitHub release are available.

@@ -3,8 +3,8 @@
   <h1>Basalt</h1>
   <p>A CLI-first local SQL workspace for structured data and coding agents.</p>
   <p>
-    <a href="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml">
-      <img src="https://github.com/joshiii-xyz/basalt/actions/workflows/ci.yml/badge.svg" alt="CI">
+    <a href="https://github.com/yoshiii-xyz/basalt/actions/workflows/ci.yml">
+      <img src="https://github.com/yoshiii-xyz/basalt/actions/workflows/ci.yml/badge.svg" alt="CI">
     </a>
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license">
@@ -47,12 +47,12 @@ The published package is named `basalt-db`; the installed command remains
 `cargo install --path . --locked`.
 
 Tagged releases include checksummed installers and prebuilt binaries for Linux,
-macOS, and Windows. See [GitHub Releases](https://github.com/joshiii-xyz/basalt/releases)
+macOS, and Windows. See [GitHub Releases](https://github.com/yoshiii-xyz/basalt/releases)
 for the current no-toolchain install. The latest tagged release is verified
 from its published installer and its checksums:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joshiii-xyz/basalt/releases/latest/download/basalt-db-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yoshiii-xyz/basalt/releases/latest/download/basalt-db-installer.sh | sh
 ```
 
 To run directly from a checkout:
@@ -184,8 +184,8 @@ elicitation use the explicit `--allow-writes` startup policy.
 The release metadata carries the visible Cargo ownership marker used by the
 MCP Registry listing:
 
-- MCP Registry ownership marker: mcp-name: io.github.joshiii-xyz/basalt
-- Published listing: [io.github.joshiii-xyz/basalt](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.joshiii-xyz%2Fbasalt)
+- MCP Registry ownership marker: mcp-name: io.github.yoshiii-xyz/basalt
+- Published listing: [io.github.yoshiii-xyz/basalt](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.yoshiii-xyz%2Fbasalt)
 
 Workspace mode exposes `workspace_import`, `workspace_inspect`,
 `workspace_preview`, `workspace_plan`, `workspace_apply`,

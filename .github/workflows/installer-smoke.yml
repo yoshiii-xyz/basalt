@@ -48,7 +48,7 @@ jobs:
           mkdir -p "$CARGO_HOME"
           installer="$RUNNER_TEMP/basalt-db-installer.sh"
           curl --fail --silent --show-error --location \
-            "https://github.com/joshiii-xyz/basalt/releases/download/${RELEASE_TAG}/basalt-db-installer.sh" \
+            "https://github.com/yoshiii-xyz/basalt/releases/download/${RELEASE_TAG}/basalt-db-installer.sh" \
             --output "$installer"
           chmod 700 "$installer"
           BASALT_DB_NO_MODIFY_PATH=1 BASALT_DB_DISABLE_UPDATE=1 "$installer"
@@ -83,7 +83,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
           $installer = Join-Path $env:RUNNER_TEMP "basalt-db-installer.ps1"
           Invoke-WebRequest `
-            -Uri "https://github.com/joshiii-xyz/basalt/releases/download/$env:RELEASE_TAG/basalt-db-installer.ps1" `
+            -Uri "https://github.com/yoshiii-xyz/basalt/releases/download/$env:RELEASE_TAG/basalt-db-installer.ps1" `
             -OutFile $installer
           $env:BASALT_DB_NO_MODIFY_PATH = "1"
           $env:BASALT_DB_DISABLE_UPDATE = "1"

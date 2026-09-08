@@ -11,8 +11,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_NAME = "io.github.joshiii-xyz/basalt"
-EXPECTED_REPOSITORY = "https://github.com/joshiii-xyz/basalt"
+EXPECTED_NAME = "io.github.yoshiii-xyz/basalt"
+EXPECTED_REPOSITORY = "https://github.com/yoshiii-xyz/basalt"
 EXPECTED_PACKAGE = "basalt-db"
 
 
